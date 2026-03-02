@@ -95,6 +95,9 @@ FetchContent_MakeAvailable(libheif)
 add_library(heifcodec SHARED heifcodec_stub.c)
 set_target_properties(heifcodec PROPERTIES LINKER_LANGUAGE CXX)
 
+# 16 KB page-size alignment (required by Google Play for Android 15+ devices).
+target_link_options(heifcodec PRIVATE -Wl,-z,max-page-size=16384)
+
 target_link_libraries(heifcodec
   PRIVATE
     -Wl,--whole-archive
