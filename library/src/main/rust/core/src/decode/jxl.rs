@@ -69,32 +69,57 @@ fn decode_rgba(data: &[u8]) -> Result<Vec<u8>, DecodeError> {
 
     let fb = render.image_all_channels();
     let num_channels = fb.channels();
-    let buf = fb.buf(); // interleaved f32 samples: [R, G, B, A, R, G, B, A, ...]
+    let buf = fb.buf(); // interleaved f32 samples
 
     let mut rgba = vec![255u8; width * height * 4];
 
-    for i in 0..(width * height) {
-        let base = i * num_channels;
-        let r = (buf[base] * 255.0).clamp(0.0, 255.0) as u8;
-        let g = if num_channels > 1 {
-            (buf[base + 1] * 255.0).clamp(0.0, 255.0) as u8
-        } else {
-            r
-        };
-        let b = if num_channels > 2 {
-            (buf[base + 2] * 255.0).clamp(0.0, 255.0) as u8
-        } else {
-            r
-        };
-        let a = if num_channels > 3 {
-            (buf[base + 3] * 255.0).clamp(0.0, 255.0) as u8
-        } else {
-            255u8
-        };
-        rgba[i * 4] = r;
-        rgba[i * 4 + 1] = g;
-        rgba[i * 4 + 2] = b;
-        rgba[i * 4 + 3] = a;
+    // Use chunk iterators to avoid per-pixel index arithmetic and bounds checks.
+    match num_channels {
+        4 => {
+            for (dst, src) in rgba.chunks_exact_mut(4).zip(buf.chunks_exact(4)) {
+                dst[0] = (src[0] * 255.0).clamp(0.0, 255.0) as u8;
+                dst[1] = (src[1] * 255.0).clamp(0.0, 255.0) as u8;
+                dst[2] = (src[2] * 255.0).clamp(0.0, 255.0) as u8;
+                dst[3] = (src[3] * 255.0).clamp(0.0, 255.0) as u8;
+            }
+        }
+        3 => {
+            for (dst, src) in rgba.chunks_exact_mut(4).zip(buf.chunks_exact(3)) {
+                dst[0] = (src[0] * 255.0).clamp(0.0, 255.0) as u8;
+                dst[1] = (src[1] * 255.0).clamp(0.0, 255.0) as u8;
+                dst[2] = (src[2] * 255.0).clamp(0.0, 255.0) as u8;
+                // dst[3] already 255
+            }
+        }
+        1 => {
+            for (dst, src) in rgba.chunks_exact_mut(4).zip(buf.iter()) {
+                let v = (*src * 255.0).clamp(0.0, 255.0) as u8;
+                dst[0] = v;
+                dst[1] = v;
+                dst[2] = v;
+                // dst[3] already 255
+            }
+        }
+        _ => {
+            for (dst, src) in rgba.chunks_exact_mut(4).zip(buf.chunks_exact(num_channels)) {
+                dst[0] = (src[0] * 255.0).clamp(0.0, 255.0) as u8;
+                dst[1] = if num_channels > 1 {
+                    (src[1] * 255.0).clamp(0.0, 255.0) as u8
+                } else {
+                    dst[0]
+                };
+                dst[2] = if num_channels > 2 {
+                    (src[2] * 255.0).clamp(0.0, 255.0) as u8
+                } else {
+                    dst[0]
+                };
+                dst[3] = if num_channels > 3 {
+                    (src[3] * 255.0).clamp(0.0, 255.0) as u8
+                } else {
+                    255
+                };
+            }
+        }
     }
 
     Ok(rgba)
