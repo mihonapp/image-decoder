@@ -17,42 +17,58 @@ pub fn downsample_region(
     out_pixels: &mut [u8],
 ) -> Result<(), DecodeError> {
     let stride = src_width * components;
-
-    // 1. Crop the requested region into a contiguous buffer.
     let crop_w = in_rect.width;
     let crop_h = in_rect.height;
     let crop_stride = crop_w * components;
-    let mut cropped = vec![0u8; (crop_stride * crop_h) as usize];
 
-    for row in 0..crop_h {
-        let src_y = in_rect.y + row;
-        let src_start = (src_y * stride + in_rect.x * components) as usize;
-        let src_end = src_start + crop_stride as usize;
-        let dst_start = (row * crop_stride) as usize;
-        let dst_end = dst_start + crop_stride as usize;
+    // Check if the source rows are already contiguous in memory
+    // (no x-offset and region width == source width).
+    let is_contiguous = in_rect.x == 0 && in_rect.width == src_width;
 
-        if src_end > src_pixels.len() {
-            return Err(DecodeError::InvalidRegion(format!(
-                "source row {} out of bounds",
-                src_y
-            )));
+    // Get a contiguous view of the cropped region, borrowing when possible.
+    let cropped_owned: Vec<u8>;
+    let cropped: &[u8] = if is_contiguous {
+        let start = (in_rect.y * stride) as usize;
+        let end = start + (crop_h * crop_stride) as usize;
+        if end > src_pixels.len() {
+            return Err(DecodeError::InvalidRegion(
+                "source region out of bounds".into(),
+            ));
         }
-        cropped[dst_start..dst_end].copy_from_slice(&src_pixels[src_start..src_end]);
-    }
+        &src_pixels[start..end]
+    } else {
+        cropped_owned = {
+            let mut buf = vec![0u8; (crop_stride * crop_h) as usize];
+            for row in 0..crop_h {
+                let src_y = in_rect.y + row;
+                let src_start = (src_y * stride + in_rect.x * components) as usize;
+                let src_end = src_start + crop_stride as usize;
+                let dst_start = (row * crop_stride) as usize;
+                let dst_end = dst_start + crop_stride as usize;
+                if src_end > src_pixels.len() {
+                    return Err(DecodeError::InvalidRegion(format!(
+                        "source row {} out of bounds",
+                        src_y
+                    )));
+                }
+                buf[dst_start..dst_end].copy_from_slice(&src_pixels[src_start..src_end]);
+            }
+            buf
+        };
+        &cropped_owned
+    };
 
-    // 2. If no downsampling needed, just copy.
+    // If no downsampling needed, just copy the cropped pixels directly.
     if sample_size <= 1 || (out_rect.width == crop_w && out_rect.height == crop_h) {
         let len = (out_rect.width * out_rect.height * components) as usize;
         out_pixels[..len].copy_from_slice(&cropped[..len]);
         return Ok(());
     }
 
-    // 3. Use fast_image_resize to scale down.
+    // Use fast_image_resize to scale down.
     if crop_w == 0 || crop_h == 0 || out_rect.width == 0 || out_rect.height == 0 {
         return Err(DecodeError::InvalidRegion("zero dimension".into()));
     }
-    let src_w = crop_w;
-    let src_h = crop_h;
     let dst_w = out_rect.width;
     let dst_h = out_rect.height;
 
@@ -67,9 +83,9 @@ pub fn downsample_region(
         }
     };
 
-    let src_image =
-        fir::images::Image::from_vec_u8(src_w, src_h, cropped, pixel_type)
-            .map_err(|e| DecodeError::DecodingFailed(format!("resize src: {e}")))?;
+    // Use ImageRef to borrow the cropped slice, avoids cloning into a Vec.
+    let src_image = fir::images::ImageRef::new(crop_w, crop_h, cropped, pixel_type)
+        .map_err(|e| DecodeError::DecodingFailed(format!("resize src: {e}")))?;
 
     let mut dst_image = fir::images::Image::new(dst_w, dst_h, pixel_type);
 
@@ -79,7 +95,7 @@ pub fn downsample_region(
         .map_err(|e| DecodeError::DecodingFailed(format!("resize: {e}")))?;
 
     let result = dst_image.into_vec();
-    let len = (out_rect.width * out_rect.height * components) as usize;
+    let len = (dst_w * dst_h * components) as usize;
     out_pixels[..len].copy_from_slice(&result[..len]);
 
     Ok(())
@@ -96,16 +112,7 @@ mod tests {
         let h = 4u32;
         let src: Vec<u8> = (0..(w * h * 4) as u8).collect();
         let mut out = vec![0u8; src.len()];
-        downsample_region(
-            &src,
-            w,
-            4,
-            Rect::full(w, h),
-            Rect::full(w, h),
-            1,
-            &mut out,
-        )
-        .unwrap();
+        downsample_region(&src, w, 4, Rect::full(w, h), Rect::full(w, h), 1, &mut out).unwrap();
         assert_eq!(src, out);
     }
 
