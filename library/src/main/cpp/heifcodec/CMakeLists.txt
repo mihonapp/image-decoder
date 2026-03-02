@@ -5,10 +5,13 @@ include(FetchContent)
 set(CMAKE_BUILD_TYPE Release)
 
 # ── Output directory ─────────────────────────────────────────────────────────
-# Output the shared library to a FIXED path so that:
-#  - Android packaging (via jniLibs.srcDirs in build.gradle) can find it.
-#  - The Rust cross-linker (via .cargo/config.toml) can find it at build time.
-set(NATIVE_LIBS_OUT "${CMAKE_CURRENT_SOURCE_DIR}/../../../../rust/native-libs")
+# Point the default shared-library output to the native-libs tree so that
+# any .so built by this project (including heifcodec itself) ends up where
+# the Rust linker and Android packaging can find it.
+#
+# CMAKE_CURRENT_SOURCE_DIR = library/src/main/cpp/heifcodec
+# ../../rust/native-libs   = library/src/main/rust/native-libs
+set(NATIVE_LIBS_OUT "${CMAKE_CURRENT_SOURCE_DIR}/../../rust/native-libs")
 set(CMAKE_LIBRARY_OUTPUT_DIRECTORY "${NATIVE_LIBS_OUT}/${ANDROID_ABI}")
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY "${NATIVE_LIBS_OUT}/${ANDROID_ABI}")
 
@@ -31,38 +34,54 @@ FetchContent_Declare(libde265
 )
 FetchContent_MakeAvailable(libde265)
 
-set(LIBDE265_FOUND 1)
+# Export variables that our custom FindLIBDE265.cmake (in cmake/) needs.
+# The custom module is used instead of libheif's own FindLIBDE265.cmake to
+# avoid find_library() failures when the "library" is a CMake target name.
+set(LIBDE265_FOUND     TRUE)
 set(LIBDE265_LIBRARIES libde265)
-set(LIBDE265_INCLUDE_DIR
-  "${libde265_SOURCE_DIR}"
-  "${libde265_BINARY_DIR}"
-)
+set(LIBDE265_INCLUDE_DIR "${libde265_SOURCE_DIR}")
 
 # ── dav1d (AV1 / AVIF decoder) ───────────────────────────────────────────────
 # Reuse the existing dav1d cmake script (meson + generate_dav1d_android_cross_compile.sh).
 include(../libheif/dav1d.cmake)
 
-# ── libheif 1.19.x ───────────────────────────────────────────────────────────
-# v1.19.x is the minimum series that satisfies the libheif-rs v2 / libheif-sys v5
-# API surface used by core/src/decode/heif.rs (v1_19 feature).
+# Provide plural alias that libheif 1.19.x may look for.
+set(DAV1D_INCLUDE_DIRS ${DAV1D_INCLUDE_DIR})
+
+# ── libheif 1.21.x ───────────────────────────────────────────────────────────
+# v1.21.x matches libheif-sys 5.2.0+1.21.2 (the Rust bindings crate).
 FetchContent_Declare(libheif
   GIT_REPOSITORY  https://github.com/strukturag/libheif.git
-  GIT_TAG         v1.19.5
+  GIT_TAG         v1.21.2
   PATCH_COMMAND   echo "" > gdk-pixbuf/CMakeLists.txt
   BINARY_DIR      libheif-build
   SUBBUILD_DIR    libheif-subbuild
 )
 
-# Mirror the option defaults used in the original C++ cmake so codec detection
-# falls back to the LIBDE265_FOUND / DAV1D_FOUND variables already set above,
-# rather than trying (and failing) to run pkg-config on the build host.
-option(WITH_EXAMPLES    "" OFF)
-option(WITH_GDK_PIXBUF  "" OFF)
-option(WITH_LIBDE265    "" OFF)   # allow cmake variable LIBDE265_FOUND to control it
-option(WITH_DAV1D       "" OFF)   # allow cmake variable DAV1D_FOUND to control it
-option(WITH_X265        "" OFF)
-option(WITH_AOM         "" OFF)
-option(WITH_RAV1E       "" OFF)
+# Use our custom Find modules (cmake/FindLIBDE265.cmake, cmake/FindDAV1D.cmake)
+# so that libheif's find_package() calls pick up the FetchContent-built libs.
+list(INSERT CMAKE_MODULE_PATH 0 "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
+
+# Disable plugin loading so all enabled codecs are compiled directly into
+# libheif.a (built-in) rather than as separate heif_xxx.so runtime plugins.
+# The actual libheif variable is ENABLE_PLUGIN_LOADING, not PLUGIN_LOADING.
+set(ENABLE_PLUGIN_LOADING OFF CACHE BOOL "" FORCE)
+
+# Enable the two codecs we care about, using FORCE so the values cannot be
+# overridden by libheif's own option() calls when it is fetched below.
+set(WITH_LIBDE265        ON  CACHE BOOL "" FORCE)
+set(WITH_LIBDE265_PLUGIN OFF CACHE BOOL "" FORCE)
+set(WITH_DAV1D           ON  CACHE BOOL "" FORCE)
+set(WITH_DAV1D_PLUGIN    OFF CACHE BOOL "" FORCE)
+
+# Disable everything we do not need.
+set(WITH_EXAMPLES       OFF CACHE BOOL "" FORCE)
+set(WITH_GDK_PIXBUF     OFF CACHE BOOL "" FORCE)
+set(WITH_X265           OFF CACHE BOOL "" FORCE)
+set(WITH_AOM            OFF CACHE BOOL "" FORCE)
+set(WITH_RAV1E          OFF CACHE BOOL "" FORCE)
+set(WITH_REDUCED_VISIBILITY OFF CACHE BOOL "" FORCE)
+set(BUILD_TESTING       OFF CACHE BOOL "" FORCE)
 
 FetchContent_MakeAvailable(libheif)
 
@@ -73,7 +92,7 @@ FetchContent_MakeAvailable(libheif)
 #
 # --whole-archive ensures every symbol from the static archives (including those
 # not directly referenced by heifcodec itself) is exported in the shared library.
-add_library(heifcodec SHARED)
+add_library(heifcodec SHARED heifcodec_stub.c)
 set_target_properties(heifcodec PROPERTIES LINKER_LANGUAGE CXX)
 
 target_link_libraries(heifcodec
@@ -90,4 +109,23 @@ target_link_libraries(heifcodec
 target_include_directories(heifcodec SYSTEM PRIVATE
   "${libheif_SOURCE_DIR}/libheif"
   "${libheif_BINARY_DIR}/libheif"
+)
+
+# ── Copy libheifcodec.so to native-libs/{ABI}/ ───────────────────────────────
+# AGP overrides CMAKE_LIBRARY_OUTPUT_DIRECTORY with its own build/intermediates
+# path, so we cannot rely on set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ...) to place
+# the .so where we need it.  Instead, copy it via POST_BUILD to the fixed path
+# that the Rust linker's rustc-link-search (in .cargo/config.toml) expects:
+#   library/src/main/rust/native-libs/{ABI}/libheifcodec.so
+#
+# CMAKE_CURRENT_SOURCE_DIR = library/src/main/cpp/heifcodec
+# so ../../rust/native-libs   = library/src/main/rust/native-libs
+set(NATIVE_LIBS_OUT "${CMAKE_CURRENT_SOURCE_DIR}/../../rust/native-libs/${ANDROID_ABI}")
+file(MAKE_DIRECTORY "${NATIVE_LIBS_OUT}")
+
+add_custom_command(TARGET heifcodec POST_BUILD
+  COMMAND ${CMAKE_COMMAND} -E copy_if_different
+    $<TARGET_FILE:heifcodec>
+    "${NATIVE_LIBS_OUT}/libheifcodec.so"
+  COMMENT "Copying libheifcodec.so → native-libs/${ANDROID_ABI}/"
 )

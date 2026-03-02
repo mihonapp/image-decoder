@@ -94,6 +94,10 @@ class ImageDecoder private constructor(
 
   companion object {
     init {
+      // libheifcodec.so must be loaded first — libimagedecoder.so links against
+      // it dynamically, and explicitly pre-loading it avoids linker namespace
+      // issues on older Android versions.
+      System.loadLibrary("heifcodec")
       System.loadLibrary("imagedecoder")
     }
 
