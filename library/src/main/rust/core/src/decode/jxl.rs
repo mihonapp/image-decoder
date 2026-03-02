@@ -75,20 +75,24 @@ fn decode_rgba(data: &[u8]) -> Result<Vec<u8>, DecodeError> {
     let mut rgba = vec![255u8; width * height * 4];
 
     // Use chunk iterators to avoid per-pixel index arithmetic and bounds checks.
+    let to_u8 = |v: f32| (v * 255.0).clamp(0.0, 255.0) as u8;
+
     match num_channels {
         4 => {
             for (dst, src) in rgba.chunks_exact_mut(4).zip(buf.chunks_exact(4)) {
-                dst[0] = (src[0] * 255.0).clamp(0.0, 255.0) as u8;
-                dst[1] = (src[1] * 255.0).clamp(0.0, 255.0) as u8;
-                dst[2] = (src[2] * 255.0).clamp(0.0, 255.0) as u8;
-                dst[3] = (src[3] * 255.0).clamp(0.0, 255.0) as u8;
+                let [r, g, b, a] = [src[0], src[1], src[2], src[3]];
+                dst[0] = to_u8(r);
+                dst[1] = to_u8(g);
+                dst[2] = to_u8(b);
+                dst[3] = to_u8(a);
             }
         }
         3 => {
             for (dst, src) in rgba.chunks_exact_mut(4).zip(buf.chunks_exact(3)) {
-                dst[0] = (src[0] * 255.0).clamp(0.0, 255.0) as u8;
-                dst[1] = (src[1] * 255.0).clamp(0.0, 255.0) as u8;
-                dst[2] = (src[2] * 255.0).clamp(0.0, 255.0) as u8;
+                let [r, g, b] = [src[0], src[1], src[2]];
+                dst[0] = to_u8(r);
+                dst[1] = to_u8(g);
+                dst[2] = to_u8(b);
                 // dst[3] already 255
             }
         }
