@@ -1,5 +1,12 @@
 use crate::decode::DecodeError;
 
+/// Convert an RGB pixel to a single luma (grayscale) value
+/// using the BT.601 luminance formula.
+#[inline]
+pub fn rgb_to_luma(r: u8, g: u8, b: u8) -> u8 {
+    ((r as u16 * 299 + g as u16 * 587 + b as u16 * 114) / 1000) as u8
+}
+
 /// Apply an ICC color transform from `src_profile_data` to `dst_profile_data`
 /// on the RGBA pixels in `pixels`.
 ///

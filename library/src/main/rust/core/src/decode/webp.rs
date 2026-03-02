@@ -1,4 +1,5 @@
 use crate::borders::find_borders;
+use crate::color::rgb_to_luma;
 use crate::decode::{DecodeError, Decoder};
 use crate::resize::downsample_region;
 use crate::types::{ImageInfo, Rect};
@@ -41,10 +42,7 @@ fn parse_info(data: &[u8], crop_borders: bool) -> Result<ImageInfo, DecodeError>
         let rgba = image.to_image().into_rgba8();
         let mut gray = vec![0u8; (image_width * image_height) as usize];
         for (i, pixel) in rgba.pixels().enumerate() {
-            let r = pixel[0] as u16;
-            let g = pixel[1] as u16;
-            let b = pixel[2] as u16;
-            gray[i] = ((r * 299 + g * 587 + b * 114) / 1000) as u8;
+            gray[i] = rgb_to_luma(pixel[0], pixel[1], pixel[2]);
         }
         bounds = find_borders(&gray, image_width, image_height);
     }
