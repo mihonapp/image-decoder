@@ -1,4 +1,5 @@
 use crate::borders::find_borders;
+use crate::color::rgb_to_luma;
 use crate::decode::{DecodeError, Decoder};
 use crate::resize::downsample_region;
 use crate::types::{ImageInfo, Rect};
@@ -40,7 +41,7 @@ fn parse_info(data: &[u8], crop_borders: bool) -> Result<ImageInfo, DecodeError>
         if let Ok(rgba) = decode_rgba(data) {
             let gray: Vec<u8> = rgba
                 .chunks_exact(4)
-                .map(|px| ((px[0] as u16 * 299 + px[1] as u16 * 587 + px[2] as u16 * 114) / 1000) as u8)
+                .map(|px| rgb_to_luma(px[0], px[1], px[2]))
                 .collect();
             bounds = find_borders(&gray, image_width, image_height);
         }
@@ -140,7 +141,15 @@ impl Decoder for JxlDecoder {
         let rgba = decode_rgba(&self.data)?;
         let full_width = self.info.image_width;
 
-        downsample_region(&rgba, full_width, 4, in_rect, out_rect, sample_size, out_pixels)
+        downsample_region(
+            &rgba,
+            full_width,
+            4,
+            in_rect,
+            out_rect,
+            sample_size,
+            out_pixels,
+        )
     }
 
     fn use_transform(&self) -> bool {
