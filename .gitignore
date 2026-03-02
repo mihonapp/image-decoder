@@ -13,3 +13,6 @@ local.properties
 **/target/
 **/*.rs.bk
 library/src/main/rust/native-libs/**
+
+# Benchmarking
+**/benchmark/build/
