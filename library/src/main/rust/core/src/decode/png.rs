@@ -1,4 +1,5 @@
 use crate::borders::find_borders;
+use crate::color::rgb_to_luma;
 use crate::decode::{DecodeError, Decoder};
 use crate::resize::downsample_region;
 use crate::types::{ImageInfo, Rect};
@@ -62,7 +63,8 @@ fn decode_grayscale(data: &[u8], width: u32, height: u32) -> Result<Vec<u8>, Dec
         .read_info()
         .map_err(|e| DecodeError::DecodingFailed(format!("PNG gray: {e}")))?;
 
-    let buf_size = reader.output_buffer_size()
+    let buf_size = reader
+        .output_buffer_size()
         .ok_or_else(|| DecodeError::DecodingFailed("PNG: cannot determine buffer size".into()))?;
     let mut buf = vec![0u8; buf_size];
     let output_info = reader
@@ -76,17 +78,17 @@ fn decode_grayscale(data: &[u8], width: u32, height: u32) -> Result<Vec<u8>, Dec
     let mut gray = vec![0u8; (width * height) as usize];
 
     for y in 0..out_h {
-        for x in 0..out_w {
-            let src_idx = y * line_size + x * samples;
-            let dst_idx = y * out_w + x;
-            gray[dst_idx] = if samples >= 3 {
-                let r = buf[src_idx] as u16;
-                let g = buf[src_idx + 1] as u16;
-                let b = buf[src_idx + 2] as u16;
-                ((r * 299 + g * 587 + b * 114) / 1000) as u8
-            } else {
-                buf[src_idx]
-            };
+        let src_row = &buf[y * line_size..y * line_size + out_w * samples];
+        let dst_row = &mut gray[y * out_w..(y + 1) * out_w];
+
+        if samples >= 3 {
+            for (dst, src) in dst_row.iter_mut().zip(src_row.chunks_exact(samples)) {
+                *dst = rgb_to_luma(src[0], src[1], src[2]);
+            }
+        } else {
+            for (dst, src) in dst_row.iter_mut().zip(src_row.chunks_exact(samples)) {
+                *dst = src[0];
+            }
         }
     }
 
@@ -112,8 +114,9 @@ impl Decoder for PngDecoder {
             .read_info()
             .map_err(|e| DecodeError::DecodingFailed(format!("PNG: {e}")))?;
 
-        let buf_size = reader.output_buffer_size()
-            .ok_or_else(|| DecodeError::DecodingFailed("PNG: cannot determine buffer size".into()))?;
+        let buf_size = reader.output_buffer_size().ok_or_else(|| {
+            DecodeError::DecodingFailed("PNG: cannot determine buffer size".into())
+        })?;
         let mut buf = vec![0u8; buf_size];
         let output_info = reader
             .next_frame(&mut buf)
@@ -129,36 +132,40 @@ impl Decoder for PngDecoder {
             vec![0u8; (self.info.image_width * self.info.image_height * 4) as usize];
 
         for y in 0..out_h {
-            for x in 0..out_w {
-                let src_idx = y * line_size + x * samples;
-                let dst_idx = (y * out_w + x) * 4;
-                match samples {
+            let src_row = &buf[y * line_size..y * line_size + out_w * samples];
+            let dst_row = &mut rgba_pixels[y * out_w * 4..(y + 1) * out_w * 4];
+
+            match samples {
                 1 => {
-                    rgba_pixels[dst_idx] = buf[src_idx];
-                    rgba_pixels[dst_idx + 1] = buf[src_idx];
-                    rgba_pixels[dst_idx + 2] = buf[src_idx];
-                    rgba_pixels[dst_idx + 3] = 255;
+                    for (dst, &luma) in dst_row.chunks_exact_mut(4).zip(src_row.iter()) {
+                        dst[0] = luma;
+                        dst[1] = luma;
+                        dst[2] = luma;
+                        dst[3] = 255;
+                    }
                 }
                 2 => {
-                    rgba_pixels[dst_idx] = buf[src_idx];
-                    rgba_pixels[dst_idx + 1] = buf[src_idx];
-                    rgba_pixels[dst_idx + 2] = buf[src_idx];
-                    rgba_pixels[dst_idx + 3] = buf[src_idx + 1];
+                    for (dst, src) in dst_row.chunks_exact_mut(4).zip(src_row.chunks_exact(2)) {
+                        let [luma, alpha] = [src[0], src[1]];
+                        dst[0] = luma;
+                        dst[1] = luma;
+                        dst[2] = luma;
+                        dst[3] = alpha;
+                    }
                 }
                 3 => {
-                    rgba_pixels[dst_idx] = buf[src_idx];
-                    rgba_pixels[dst_idx + 1] = buf[src_idx + 1];
-                    rgba_pixels[dst_idx + 2] = buf[src_idx + 2];
-                    rgba_pixels[dst_idx + 3] = 255;
+                    for (dst, src) in dst_row.chunks_exact_mut(4).zip(src_row.chunks_exact(3)) {
+                        let [r, g, b] = [src[0], src[1], src[2]];
+                        dst[0] = r;
+                        dst[1] = g;
+                        dst[2] = b;
+                        dst[3] = 255;
+                    }
                 }
                 4 => {
-                    rgba_pixels[dst_idx] = buf[src_idx];
-                    rgba_pixels[dst_idx + 1] = buf[src_idx + 1];
-                    rgba_pixels[dst_idx + 2] = buf[src_idx + 2];
-                    rgba_pixels[dst_idx + 3] = buf[src_idx + 3];
+                    dst_row.copy_from_slice(src_row);
                 }
                 _ => {}
-            }
             }
         }
 
