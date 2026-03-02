@@ -32,21 +32,20 @@ pub fn transform_pixels(
     )
     .map_err(|e| DecodeError::ColorManagement(format!("transform: {e}")))?;
 
-    // Save alpha channel (lcms2 may clobber it)
-    let alphas: Vec<u8> = pixels[..pixel_count * 4]
-        .chunks_exact(4)
-        .map(|px| px[3])
-        .collect();
-
     // Transform in-place: reinterpret &[u8] as &[[u8; 4]]
     let src_slice: &[[u8; 4]] = bytemuck::cast_slice(&pixels[..pixel_count * 4]);
     let mut output: Vec<[u8; 4]> = vec![[0u8; 4]; pixel_count];
     t.transform_pixels(src_slice, &mut output);
-    pixels[..pixel_count * 4].copy_from_slice(bytemuck::cast_slice(&output));
 
-    // Restore alpha
-    for (i, &a) in alphas.iter().enumerate() {
-        pixels[i * 4 + 3] = a;
+    // Restore alpha from original while copying result back
+    let out_bytes: &[u8] = bytemuck::cast_slice(&output);
+    for (chunk, src_chunk) in pixels[..pixel_count * 4]
+        .chunks_exact_mut(4)
+        .zip(out_bytes.chunks_exact(4))
+    {
+        let alpha = chunk[3]; // save original alpha before overwrite
+        chunk[..3].copy_from_slice(&src_chunk[..3]);
+        chunk[3] = alpha;
     }
 
     Ok(())
