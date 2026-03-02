@@ -38,13 +38,10 @@ fn parse_info(data: &[u8], crop_borders: bool) -> Result<ImageInfo, DecodeError>
 
     if crop_borders {
         if let Ok(rgba) = decode_rgba(data) {
-            let mut gray = vec![0u8; (image_width * image_height) as usize];
-            for i in 0..(image_width * image_height) as usize {
-                let r = rgba[i * 4] as u16;
-                let g = rgba[i * 4 + 1] as u16;
-                let b = rgba[i * 4 + 2] as u16;
-                gray[i] = ((r * 299 + g * 587 + b * 114) / 1000) as u8;
-            }
+            let gray: Vec<u8> = rgba
+                .chunks_exact(4)
+                .map(|px| ((px[0] as u16 * 299 + px[1] as u16 * 587 + px[2] as u16 * 114) / 1000) as u8)
+                .collect();
             bounds = find_borders(&gray, image_width, image_height);
         }
     }
