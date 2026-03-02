@@ -252,16 +252,12 @@ pub extern "system" fn Java_tachiyomi_decoder_ImageDecoder_nativeDecode<'caller>
             }
 
             let pixel_count = (out_rect.width * out_rect.height) as usize;
-            let mut out_buffer = vec![0u8; pixel_count * 4];
+            let out_slice = unsafe {
+                std::slice::from_raw_parts_mut(pixels_ptr as *mut u8, pixel_count * 4)
+            };
 
-            match decoder.decode(&mut out_buffer, out_rect, in_rect, sample_size as u32) {
-                Ok(()) => unsafe {
-                    std::ptr::copy_nonoverlapping(
-                        out_buffer.as_ptr(),
-                        pixels_ptr as *mut u8,
-                        pixel_count * 4,
-                    );
-                },
+            match decoder.decode(out_slice, out_rect, in_rect, sample_size as u32) {
+                Ok(()) => {}
                 Err(e) => {
                     log::error!("Decode error: {e}");
                     unsafe {
