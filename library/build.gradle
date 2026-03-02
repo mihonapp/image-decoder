@@ -70,6 +70,7 @@ cargo {
     libname = "imagedecoder"
     targets = ["arm64", "arm", "x86", "x86_64"]
     targetDirectory = "src/main/rust/target"
+    profile = "release"
 }
 
 afterEvaluate {
