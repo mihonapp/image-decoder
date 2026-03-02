@@ -53,8 +53,7 @@ android {
 
     sourceSets {
         main {
-            // Make AGP aware of the pre-built .so files produced by CMake above.
-            jniLibs.srcDirs = ['src/main/jniLibs', 'src/main/rust/native-libs']
+            jniLibs.srcDirs += ['src/main/rust/native-libs']
         }
     }
 
@@ -84,5 +83,10 @@ afterEvaluate {
                 version = '1.0'
             }
         }
+    }
+
+    // Ensure all cargoBuild* tasks run AFTER the CMake build tasks for heifcodec.
+    tasks.matching { it.name.startsWith("cargoBuild") }.configureEach { cargoTask ->
+        cargoTask.dependsOn tasks.matching { it.name.startsWith("buildCMake") }
     }
 }
