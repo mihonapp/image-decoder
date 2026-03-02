@@ -1,0 +1,26 @@
+[package]
+name = "imagedecoder-core"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+# Image format decoders
+zune-jpeg = "0.5"
+png = "0.18"
+webp = "0.3"
+jxl-oxide = "0.12"
+libheif-rs = { version = "2", features = ["v1_19"] }
+
+# Color management
+lcms2 = { version = "6", features = ["static"] }
+bytemuck = "1"
+
+# Downscaling
+fast_image_resize = "6"
+
+# Utilities
+thiserror = "2"
+log = "0.4"
+
+[dev-dependencies]
+env_logger = "0.11"

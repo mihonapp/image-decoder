@@ -8,3 +8,7 @@
 .externalNativeBuild
 .cxx
 local.properties
+
+# Rust
+**/target/
+**/*.rs.bk
