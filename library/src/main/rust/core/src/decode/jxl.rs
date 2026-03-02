@@ -68,66 +68,55 @@ fn decode_rgba(data: &[u8]) -> Result<Vec<u8>, DecodeError> {
         .render_frame(0)
         .map_err(|e| DecodeError::DecodingFailed(format!("JXL render: {e}")))?;
 
-    let fb = render.image_all_channels();
-    let num_channels = fb.channels();
-    let buf = fb.buf(); // interleaved f32 samples
+    // Use stream() to convert directly from grid to u8, avoiding the
+    // intermediate f32 FrameBuffer allocation that image_all_channels() creates.
+    let mut stream = render.stream();
+    let num_channels = stream.channels() as usize;
 
-    let mut rgba = vec![255u8; width * height * 4];
+    if num_channels == 4 {
+        // RGBA — write directly into the output buffer.
+        let mut rgba = vec![0u8; width * height * 4];
+        stream.write_to_buffer::<u8>(&mut rgba);
+        Ok(rgba)
+    } else {
+        // Stream has fewer channels (e.g. RGB=3, Gray=1).
+        // Read into a compact buffer, then expand to RGBA.
+        let mut compact = vec![0u8; width * height * num_channels];
+        stream.write_to_buffer::<u8>(&mut compact);
 
-    // Use chunk iterators to avoid per-pixel index arithmetic and bounds checks.
-    let to_u8 = |v: f32| (v * 255.0).clamp(0.0, 255.0) as u8;
-
-    match num_channels {
-        4 => {
-            for (dst, src) in rgba.chunks_exact_mut(4).zip(buf.chunks_exact(4)) {
-                let [r, g, b, a] = [src[0], src[1], src[2], src[3]];
-                dst[0] = to_u8(r);
-                dst[1] = to_u8(g);
-                dst[2] = to_u8(b);
-                dst[3] = to_u8(a);
+        let mut rgba = vec![255u8; width * height * 4];
+        match num_channels {
+            3 => {
+                for (dst, src) in rgba.chunks_exact_mut(4).zip(compact.chunks_exact(3)) {
+                    let [r, g, b] = [src[0], src[1], src[2]];
+                    dst[0] = r;
+                    dst[1] = g;
+                    dst[2] = b;
+                    // dst[3] already 255
+                }
+            }
+            1 => {
+                for (dst, &luma) in rgba.chunks_exact_mut(4).zip(compact.iter()) {
+                    dst[0] = luma;
+                    dst[1] = luma;
+                    dst[2] = luma;
+                    // dst[3] already 255
+                }
+            }
+            _ => {
+                for (dst, src) in rgba
+                    .chunks_exact_mut(4)
+                    .zip(compact.chunks_exact(num_channels))
+                {
+                    dst[0] = src[0];
+                    dst[1] = src.get(1).copied().unwrap_or(src[0]);
+                    dst[2] = src.get(2).copied().unwrap_or(src[0]);
+                    dst[3] = src.get(3).copied().unwrap_or(255);
+                }
             }
         }
-        3 => {
-            for (dst, src) in rgba.chunks_exact_mut(4).zip(buf.chunks_exact(3)) {
-                let [r, g, b] = [src[0], src[1], src[2]];
-                dst[0] = to_u8(r);
-                dst[1] = to_u8(g);
-                dst[2] = to_u8(b);
-                // dst[3] already 255
-            }
-        }
-        1 => {
-            for (dst, src) in rgba.chunks_exact_mut(4).zip(buf.iter()) {
-                let v = (*src * 255.0).clamp(0.0, 255.0) as u8;
-                dst[0] = v;
-                dst[1] = v;
-                dst[2] = v;
-                // dst[3] already 255
-            }
-        }
-        _ => {
-            for (dst, src) in rgba.chunks_exact_mut(4).zip(buf.chunks_exact(num_channels)) {
-                dst[0] = (src[0] * 255.0).clamp(0.0, 255.0) as u8;
-                dst[1] = if num_channels > 1 {
-                    (src[1] * 255.0).clamp(0.0, 255.0) as u8
-                } else {
-                    dst[0]
-                };
-                dst[2] = if num_channels > 2 {
-                    (src[2] * 255.0).clamp(0.0, 255.0) as u8
-                } else {
-                    dst[0]
-                };
-                dst[3] = if num_channels > 3 {
-                    (src[3] * 255.0).clamp(0.0, 255.0) as u8
-                } else {
-                    255
-                };
-            }
-        }
+        Ok(rgba)
     }
-
-    Ok(rgba)
 }
 
 impl Decoder for JxlDecoder {
