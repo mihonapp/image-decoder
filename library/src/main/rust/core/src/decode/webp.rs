@@ -28,23 +28,30 @@ impl WebpDecoder {
 }
 
 fn parse_info(data: &[u8], crop_borders: bool) -> Result<ImageInfo, DecodeError> {
-    let decoder = webp::Decoder::new(data);
-    let image = decoder
-        .decode()
-        .ok_or_else(|| DecodeError::DecodingFailed("WebP decode failed".into()))?;
+    // Get dimensions from the bitstream header without decoding pixels.
+    let features = webp::BitstreamFeatures::new(data)
+        .ok_or_else(|| DecodeError::DecodingFailed("WebP: invalid bitstream".into()))?;
 
-    let image_width = image.width();
-    let image_height = image.height();
+    let image_width = features.width();
+    let image_height = features.height();
 
     let mut bounds = Rect::full(image_width, image_height);
 
     if crop_borders {
-        let rgba = image.to_image().into_rgba8();
-        let mut gray = vec![0u8; (image_width * image_height) as usize];
-        for (i, pixel) in rgba.pixels().enumerate() {
-            gray[i] = rgb_to_luma(pixel[0], pixel[1], pixel[2]);
+        // Full decode is only needed for border detection.
+        let decoder = webp::Decoder::new(data);
+        let image = decoder
+            .decode()
+            .ok_or_else(|| DecodeError::DecodingFailed("WebP decode failed".into()))?;
+
+        let mut rgba_buf = image.to_image().into_rgba8().into_raw();
+        // Convert RGBA to grayscale in-place to avoid a second allocation.
+        let pixel_count = (image_width * image_height) as usize;
+        for i in 0..pixel_count {
+            let base = i * 4;
+            rgba_buf[i] = rgb_to_luma(rgba_buf[base], rgba_buf[base + 1], rgba_buf[base + 2]);
         }
-        bounds = find_borders(&gray, image_width, image_height);
+        bounds = find_borders(&rgba_buf[..pixel_count], image_width, image_height);
     }
 
     Ok(ImageInfo {
