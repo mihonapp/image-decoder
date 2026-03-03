@@ -41,12 +41,14 @@ fn parse_info(data: &[u8], crop_borders: bool) -> Result<ImageInfo, DecodeError>
     let mut bounds = Rect::full(image_width, image_height);
 
     if crop_borders {
-        if let Ok(rgba) = decode_rgba_from_ctx(&ctx) {
-            let gray: Vec<u8> = rgba
-                .chunks_exact(4)
-                .map(|px| rgb_to_luma(px[0], px[1], px[2]))
-                .collect();
-            bounds = find_borders(&gray, image_width, image_height);
+        if let Ok(mut rgba) = decode_rgba_from_ctx(&ctx) {
+            // Convert RGBA to grayscale in-place to avoid a second allocation.
+            let pixel_count = (image_width * image_height) as usize;
+            for i in 0..pixel_count {
+                let base = i * 4;
+                rgba[i] = rgb_to_luma(rgba[base], rgba[base + 1], rgba[base + 2]);
+            }
+            bounds = find_borders(&rgba[..pixel_count], image_width, image_height);
         }
     }
 
