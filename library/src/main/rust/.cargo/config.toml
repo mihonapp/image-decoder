@@ -16,6 +16,9 @@
 # Note: rustc-link-search paths here are relative to the Cargo workspace root,
 # which is library/src/main/rust/ (where the top-level Cargo.toml lives).
 
+[target.aarch64-linux-android]
+rustflags = ["-C", "target-feature=+neon"]
+
 [target.aarch64-linux-android.heif]
 rustc-link-lib = ["dylib=heifcodec"]
 rustc-link-search = ["native=native-libs/arm64-v8a"]
