@@ -30,21 +30,82 @@ impl JxlDecoder {
     }
 }
 
-fn parse_info(data: &[u8], crop_borders: bool) -> Result<ImageInfo, DecodeError> {
-    let (metadata, _) = decode_internal(data)?;
+/// Read only the JXL basic info (width, height) from the header without
+/// decoding any pixel data. Uses the low-level jpegxl-sys FFI so that
+/// only `BasicInfo` events are subscribed (no `FullImage`).
+fn read_basic_info(data: &[u8]) -> Result<(u32, u32), DecodeError> {
+    use jpegxl_sys::decode::{
+        JxlDecoderCreate, JxlDecoderDestroy, JxlDecoderGetBasicInfo, JxlDecoderProcessInput,
+        JxlDecoderSetInput, JxlDecoderStatus, JxlDecoderSubscribeEvents,
+    };
+    use std::mem::MaybeUninit;
+    use std::ptr;
 
-    let image_width = metadata.width;
-    let image_height = metadata.height;
+    unsafe {
+        let dec = JxlDecoderCreate(ptr::null());
+        if dec.is_null() {
+            return Err(DecodeError::DecodingFailed(
+                "JXL: failed to create decoder".into(),
+            ));
+        }
+
+        // Subscribe only to BasicInfo — no pixel decoding will happen.
+        let status = JxlDecoderSubscribeEvents(dec, JxlDecoderStatus::BasicInfo as i32);
+        if status != JxlDecoderStatus::Success {
+            JxlDecoderDestroy(dec);
+            return Err(DecodeError::DecodingFailed(
+                "JXL: failed to subscribe events".into(),
+            ));
+        }
+
+        let status = JxlDecoderSetInput(dec, data.as_ptr(), data.len());
+        if status != JxlDecoderStatus::Success {
+            JxlDecoderDestroy(dec);
+            return Err(DecodeError::DecodingFailed(
+                "JXL: failed to set input".into(),
+            ));
+        }
+
+        let status = JxlDecoderProcessInput(dec);
+        if status != JxlDecoderStatus::BasicInfo {
+            JxlDecoderDestroy(dec);
+            return Err(DecodeError::DecodingFailed(format!(
+                "JXL: expected BasicInfo, got {status:?}"
+            )));
+        }
+
+        let mut info = MaybeUninit::uninit();
+        let status = JxlDecoderGetBasicInfo(dec, info.as_mut_ptr());
+        if status != JxlDecoderStatus::Success {
+            JxlDecoderDestroy(dec);
+            return Err(DecodeError::DecodingFailed(
+                "JXL: failed to get basic info".into(),
+            ));
+        }
+
+        let info = info.assume_init();
+        let w = info.xsize;
+        let h = info.ysize;
+        JxlDecoderDestroy(dec);
+        Ok((w, h))
+    }
+}
+
+fn parse_info(data: &[u8], crop_borders: bool) -> Result<ImageInfo, DecodeError> {
+    let (image_width, image_height) = read_basic_info(data)?;
 
     let mut bounds = Rect::full(image_width, image_height);
 
     if crop_borders {
-        if let Ok(rgba) = decode_rgba(data) {
-            let gray: Vec<u8> = rgba
-                .chunks_exact(4)
-                .map(|px| rgb_to_luma(px[0], px[1], px[2]))
-                .collect();
-            bounds = find_borders(&gray, image_width, image_height);
+        if let Ok(mut rgba) = decode_rgba(data) {
+            // Convert RGBA→grayscale in-place: overwrite the first W*H bytes
+            // of the buffer so we don't allocate a second Vec.
+            let pixel_count = (image_width * image_height) as usize;
+            for i in 0..pixel_count {
+                let base = i * 4;
+                rgba[i] = rgb_to_luma(rgba[base], rgba[base + 1], rgba[base + 2]);
+            }
+            bounds = find_borders(&rgba[..pixel_count], image_width, image_height);
         }
     }
 
