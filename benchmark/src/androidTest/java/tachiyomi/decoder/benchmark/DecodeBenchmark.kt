@@ -32,7 +32,7 @@ import tachiyomi.decoder.ImageDecoder
  * test_image.avif – AVIF test_image.jxl – JPEG XL
  *
  * If an asset is missing, the corresponding tests are skipped via [assumeTrue]. JPEG / PNG / WebP
- * images are generated automatically (512 × 512 gradient) when not present in assets.
+ * images are generated automatically (6400 × 3600 gradient) when not present in assets.
  */
 @RunWith(AndroidJUnit4::class)
 class DecodeBenchmark {
@@ -72,20 +72,21 @@ class DecodeBenchmark {
         }
     }
 
-    /** Create a 512×512 gradient bitmap and compress it to the given format. */
+    /** Create a 6400×3600 gradient bitmap and compress it to the given format. */
     private fun generateTestImage(ext: String): ByteArray {
-        val size = 512
-        val bitmap = Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888)
-        val pixels = IntArray(size * size)
-        for (y in 0 until size) {
-            for (x in 0 until size) {
-                val r = (x * 255 / size)
-                val g = (y * 255 / size)
-                val b = ((x + y) * 127 / size).coerceAtMost(255)
-                pixels[y * size + x] = (0xFF shl 24) or (r shl 16) or (g shl 8) or b
+        val width = 6400
+        val height = 3600
+        val bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
+        val pixels = IntArray(width * height)
+        for (y in 0 until height) {
+            for (x in 0 until width) {
+                val r = (x * 255 / width)
+                val g = (y * 255 / height)
+                val b = ((x + y) * 127 / (width + height)).coerceAtMost(255)
+                pixels[y * width + x] = (0xFF shl 24) or (r shl 16) or (g shl 8) or b
             }
         }
-        bitmap.setPixels(pixels, 0, size, 0, 0, size, size)
+        bitmap.setPixels(pixels, 0, width, 0, 0, width, height)
 
         val format =
                 when (ext) {
