@@ -54,6 +54,7 @@ pub fn downsample_region(
     let pixel_type = match components {
         1 => fir::PixelType::U8,
         2 => fir::PixelType::U8x2,
+        3 => fir::PixelType::U8x3,
         4 => fir::PixelType::U8x4,
         _ => {
             return Err(DecodeError::DecodingFailed(format!(
@@ -62,36 +63,24 @@ pub fn downsample_region(
         }
     };
 
-    // Borrow the cropped region without allocating when rows are contiguous.
-    let is_contiguous = in_rect.x == 0 && in_rect.width == src_width;
-    let cropped_owned: Vec<u8>;
-    let cropped: &[u8] = if is_contiguous {
-        let start = in_rect.y as usize * stride;
-        &src_pixels[start..start + crop_h as usize * crop_stride]
-    } else {
-        cropped_owned = {
-            let mut buf = vec![0u8; crop_h as usize * crop_stride];
-            for row in 0..crop_h as usize {
-                let src_start =
-                    (in_rect.y as usize + row) * stride + in_rect.x as usize * components as usize;
-                let dst_start = row * crop_stride;
-                buf[dst_start..dst_start + crop_stride]
-                    .copy_from_slice(&src_pixels[src_start..src_start + crop_stride]);
-            }
-            buf
-        };
-        &cropped_owned
-    };
+    let src_height = (src_pixels.len() / (src_width as usize * components as usize)) as u32;
 
-    let src_image = fir::images::ImageRef::new(crop_w, crop_h, cropped, pixel_type)
+    let src_image = fir::images::ImageRef::new(src_width, src_height, src_pixels, pixel_type)
         .map_err(|e| DecodeError::DecodingFailed(format!("resize src: {e}")))?;
 
-    // Write directly into the caller's output buffer 
-    let mut dst_image = fir::images::Image::from_slice_u8(dst_w, dst_h, out_pixels, pixel_type)
+    let dst_pixel_type = pixel_type;
+
+    let mut dst_image = fir::images::Image::from_slice_u8(dst_w, dst_h, out_pixels, dst_pixel_type)
         .map_err(|e| DecodeError::DecodingFailed(format!("resize dst: {e}")))?;
 
     let options = fir::ResizeOptions::new()
-        .resize_alg(fir::ResizeAlg::Convolution(fir::FilterType::CatmullRom));
+        .resize_alg(fir::ResizeAlg::Convolution(fir::FilterType::CatmullRom))
+        .crop(
+            in_rect.x as f64,
+            in_rect.y as f64,
+            crop_w as f64,
+            crop_h as f64,
+        );
 
     let mut resizer = fir::Resizer::new();
     resizer
