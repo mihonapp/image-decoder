@@ -652,10 +652,10 @@ dependencies = [
 name = "imagedecoder-core"
 version = "0.1.0"
 dependencies = [
- "bytemuck",
  "env_logger",
  "fast_image_resize",
  "jpegxl-rs",
+ "jpegxl-sys",
  "lcms2",
  "libheif-rs",
  "log",

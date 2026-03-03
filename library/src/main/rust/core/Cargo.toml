@@ -11,11 +11,11 @@ webp = "0.3"
 jpegxl-rs = { version = "0.13", default-features = false, features = [
     "vendored",
 ] }
+jpegxl-sys = "0.12"
 libheif-rs = "2"
 
 # Color management
 lcms2 = { version = "6", features = ["static"] }
-bytemuck = "1"
 
 # Downscaling
 fast_image_resize = { version = "6", features = ["rayon"] }
