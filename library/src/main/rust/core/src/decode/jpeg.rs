@@ -7,6 +7,7 @@ use crate::types::{ImageInfo, Rect};
 pub struct JpegDecoder {
     data: Vec<u8>,
     info: ImageInfo,
+    #[allow(dead_code)]
     target_profile_data: Option<Vec<u8>>,
 }
 
@@ -72,11 +73,11 @@ impl Decoder for JpegDecoder {
         in_rect: Rect,
         sample_size: u32,
     ) -> Result<(), DecodeError> {
-        // Decode the full image to RGBA
+        // Decode the full image to RGB for faster decoding and resizing (less memory)
         use zune_jpeg::zune_core::colorspace::ColorSpace;
         use zune_jpeg::zune_core::options::DecoderOptions;
 
-        let opts = DecoderOptions::default().jpeg_set_out_colorspace(ColorSpace::RGBA);
+        let opts = DecoderOptions::default().jpeg_set_out_colorspace(ColorSpace::RGB);
         let mut decoder =
             zune_jpeg::JpegDecoder::new_with_options(std::io::Cursor::new(&self.data), opts);
         let pixels = decoder
@@ -89,12 +90,29 @@ impl Decoder for JpegDecoder {
         downsample_region(
             &pixels,
             full_width,
-            4, // RGBA components
+            3, // RGB components
             in_rect,
             out_rect,
             sample_size,
             out_pixels,
-        )
+        )?;
+
+        // Expand RGB to RGBA in-place since Android bitmaps expect RGBA.
+        // We write the downsampled RGB into `out_pixels`, which is sized for RGBA.
+        let pixel_count = (out_rect.width * out_rect.height) as usize;
+        for i in (0..pixel_count).rev() {
+            let src_base = i * 3;
+            let dst_base = i * 4;
+            let r = out_pixels[src_base];
+            let g = out_pixels[src_base + 1];
+            let b = out_pixels[src_base + 2];
+            out_pixels[dst_base] = r;
+            out_pixels[dst_base + 1] = g;
+            out_pixels[dst_base + 2] = b;
+            out_pixels[dst_base + 3] = 255;
+        }
+
+        Ok(())
     }
 
     fn use_transform(&self) -> bool {
