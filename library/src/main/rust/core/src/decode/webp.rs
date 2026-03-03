@@ -44,14 +44,23 @@ fn parse_info(data: &[u8], crop_borders: bool) -> Result<ImageInfo, DecodeError>
             .decode()
             .ok_or_else(|| DecodeError::DecodingFailed("WebP decode failed".into()))?;
 
-        let mut rgba_buf = image.to_image().into_rgba8().into_raw();
-        // Convert RGBA to grayscale in-place to avoid a second allocation.
+        let is_alpha = image.is_alpha();
         let pixel_count = (image_width * image_height) as usize;
-        for i in 0..pixel_count {
-            let base = i * 4;
-            rgba_buf[i] = rgb_to_luma(rgba_buf[base], rgba_buf[base + 1], rgba_buf[base + 2]);
+        let mut gray_buf = vec![0u8; pixel_count];
+        
+        let src_raw = &*image;
+        if is_alpha {
+            for i in 0..pixel_count {
+                let base = i * 4;
+                gray_buf[i] = rgb_to_luma(src_raw[base], src_raw[base + 1], src_raw[base + 2]);
+            }
+        } else {
+            for i in 0..pixel_count {
+                let base = i * 3;
+                gray_buf[i] = rgb_to_luma(src_raw[base], src_raw[base + 1], src_raw[base + 2]);
+            }
         }
-        bounds = find_borders(&rgba_buf[..pixel_count], image_width, image_height);
+        bounds = find_borders(&gray_buf, image_width, image_height);
     }
 
     Ok(ImageInfo {
@@ -79,18 +88,40 @@ impl Decoder for WebpDecoder {
             .decode()
             .ok_or_else(|| DecodeError::DecodingFailed("WebP decode failed".into()))?;
 
-        let rgba = image.to_image().into_rgba8();
+        let is_alpha = image.is_alpha();
         let full_width = self.info.image_width;
+        let components = if is_alpha { 4 } else { 3 };
 
         downsample_region(
-            rgba.as_raw(),
+            &*image,
             full_width,
-            4,
+            components,
             in_rect,
             out_rect,
             sample_size,
             out_pixels,
-        )
+        )?;
+
+        // If the source was RGB (3 components), `downsample_region` will write an RGB output
+        // into the front of `out_pixels`.  However, `out_pixels` is sized for RGBA (4 bytes per pixel).
+        // We must expand the RGB result in-place to RGBA.
+        if !is_alpha {
+            let pixel_count = (out_rect.width * out_rect.height) as usize;
+            for i in (0..pixel_count).rev() {
+                let src_base = i * 3;
+                let dst_base = i * 4;
+                // Read first to avoid overwriting if memory overlaps
+                let r = out_pixels[src_base];
+                let g = out_pixels[src_base + 1];
+                let b = out_pixels[src_base + 2];
+                out_pixels[dst_base] = r;
+                out_pixels[dst_base + 1] = g;
+                out_pixels[dst_base + 2] = b;
+                out_pixels[dst_base + 3] = 255;
+            }
+        }
+        
+        Ok(())
     }
 
     fn use_transform(&self) -> bool {
