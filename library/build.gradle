@@ -109,4 +109,12 @@ afterEvaluate {
     tasks.matching { it.name.startsWith("cargoBuild") }.configureEach { cargoTask ->
         cargoTask.dependsOn tasks.matching { it.name.startsWith("buildCMake") }
     }
+
+    // Explicitly hook Cargo into the Android build process.
+    tasks.matching { 
+        it.name.matches("merge.*JniLibFolders") || 
+        it.name.matches("merge.*NativeLibs") 
+    }.configureEach { task ->
+        task.dependsOn tasks.matching { it.name.startsWith("cargoBuild") }
+    }
 }
