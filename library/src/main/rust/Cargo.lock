@@ -664,6 +664,7 @@ dependencies = [
  "jpegxl-sys",
  "lcms2",
  "libheif-rs",
+ "libwebp-sys 0.14.2",
  "log",
  "png",
  "thiserror 2.0.18",
@@ -924,6 +925,17 @@ checksum = "54cd30df7c7165ce74a456e4ca9732c603e8dc5e60784558c1c6dc047f876733"
 dependencies = [
  "cc",
  "glob",
+]
+
+[[package]]
+name = "libwebp-sys"
+version = "0.14.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "375ca3fbd6d89769361c5d505c9da676eb4128ee471b9fd763144d377a2d30e6"
+dependencies = [
+ "cc",
+ "glob",
+ "pkg-config",
 ]
 
 [[package]]
@@ -1682,7 +1694,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c071456adef4aca59bf6a583c46b90ff5eb0b4f758fc347cea81290288f37ce1"
 dependencies = [
  "image",
- "libwebp-sys",
+ "libwebp-sys 0.9.6",
 ]
 
 [[package]]

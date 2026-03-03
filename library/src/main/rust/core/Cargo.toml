@@ -8,6 +8,9 @@ edition = "2021"
 turbojpeg = "1.4.0"
 png = "0.18"
 webp = "0.3"
+libwebp-sys = { version = "0.14", default-features = false, features = [
+    "parallel",
+] }
 jpegxl-rs = { version = "0.13", default-features = false, features = [
     "vendored",
 ] }

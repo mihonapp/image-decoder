@@ -1,10 +1,8 @@
 use crate::borders::find_borders;
 use crate::color::rgb_to_luma;
 use crate::decode::{DecodeError, Decoder};
-use crate::resize::downsample_region;
 use crate::types::{ImageInfo, Rect};
 
-/// WebP decoder backed by the `webp` crate.
 pub struct WebpDecoder {
     data: Vec<u8>,
     info: ImageInfo,
@@ -28,39 +26,57 @@ impl WebpDecoder {
 }
 
 fn parse_info(data: &[u8], crop_borders: bool) -> Result<ImageInfo, DecodeError> {
-    // Get dimensions from the bitstream header without decoding pixels.
-    let features = webp::BitstreamFeatures::new(data)
-        .ok_or_else(|| DecodeError::DecodingFailed("WebP: invalid bitstream".into()))?;
+    let mut image_width = 0;
+    let mut image_height = 0;
 
-    let image_width = features.width();
-    let image_height = features.height();
+    let status = unsafe {
+        libwebp_sys::WebPGetInfo(
+            data.as_ptr(),
+            data.len(),
+            &mut image_width,
+            &mut image_height,
+        )
+    };
 
+    if status == 0 {
+        return Err(DecodeError::DecodingFailed(
+            "WebP: invalid bitstream".into(),
+        ));
+    }
+
+    let image_width = image_width as u32;
+    let image_height = image_height as u32;
     let mut bounds = Rect::full(image_width, image_height);
 
     if crop_borders {
-        // Full decode is only needed for border detection.
         let decoder = webp::Decoder::new(data);
-        let image = decoder
-            .decode()
-            .ok_or_else(|| DecodeError::DecodingFailed("WebP decode failed".into()))?;
+        if let Some(image) = decoder.decode() {
+            let is_alpha = image.is_alpha();
+            let pixel_count = (image_width * image_height) as usize;
 
-        let is_alpha = image.is_alpha();
-        let pixel_count = (image_width * image_height) as usize;
-        let mut gray_buf = vec![0u8; pixel_count];
-        
-        let src_raw = &*image;
-        if is_alpha {
-            for i in 0..pixel_count {
-                let base = i * 4;
-                gray_buf[i] = rgb_to_luma(src_raw[base], src_raw[base + 1], src_raw[base + 2]);
+            let mut gray_buf = Vec::with_capacity(pixel_count);
+            unsafe {
+                gray_buf.set_len(pixel_count);
             }
+
+            let src_raw = &*image;
+            if is_alpha {
+                for i in 0..pixel_count {
+                    let base = i * 4;
+                    gray_buf[i] = rgb_to_luma(src_raw[base], src_raw[base + 1], src_raw[base + 2]);
+                }
+            } else {
+                for i in 0..pixel_count {
+                    let base = i * 3;
+                    gray_buf[i] = rgb_to_luma(src_raw[base], src_raw[base + 1], src_raw[base + 2]);
+                }
+            }
+            bounds = find_borders(&gray_buf, image_width, image_height);
         } else {
-            for i in 0..pixel_count {
-                let base = i * 3;
-                gray_buf[i] = rgb_to_luma(src_raw[base], src_raw[base + 1], src_raw[base + 2]);
-            }
+            return Err(DecodeError::DecodingFailed(
+                "WebP border decode failed".into(),
+            ));
         }
-        bounds = find_borders(&gray_buf, image_width, image_height);
     }
 
     Ok(ImageInfo {
@@ -81,46 +97,48 @@ impl Decoder for WebpDecoder {
         out_pixels: &mut [u8],
         out_rect: Rect,
         in_rect: Rect,
-        sample_size: u32,
+        _sample_size: u32,
     ) -> Result<(), DecodeError> {
-        let decoder = webp::Decoder::new(&self.data);
-        let image = decoder
-            .decode()
-            .ok_or_else(|| DecodeError::DecodingFailed("WebP decode failed".into()))?;
-
-        let is_alpha = image.is_alpha();
-        let full_width = self.info.image_width;
-        let components = if is_alpha { 4 } else { 3 };
-
-        downsample_region(
-            &*image,
-            full_width,
-            components,
-            in_rect,
-            out_rect,
-            sample_size,
-            out_pixels,
-        )?;
-
-        // If the source was RGB (3 components), `downsample_region` will write an RGB output
-        // into the front of `out_pixels`.  However, `out_pixels` is sized for RGBA (4 bytes per pixel).
-        // We must expand the RGB result in-place to RGBA.
-        if !is_alpha {
-            let pixel_count = (out_rect.width * out_rect.height) as usize;
-            for i in (0..pixel_count).rev() {
-                let src_base = i * 3;
-                let dst_base = i * 4;
-                // Read first to avoid overwriting if memory overlaps
-                let r = out_pixels[src_base];
-                let g = out_pixels[src_base + 1];
-                let b = out_pixels[src_base + 2];
-                out_pixels[dst_base] = r;
-                out_pixels[dst_base + 1] = g;
-                out_pixels[dst_base + 2] = b;
-                out_pixels[dst_base + 3] = 255;
-            }
+        let mut config: libwebp_sys::WebPDecoderConfig = unsafe { std::mem::zeroed() };
+        if !unsafe { libwebp_sys::WebPInitDecoderConfig(&mut config) } {
+            return Err(DecodeError::DecodingFailed(
+                "WebPInitDecoderConfig failed".into(),
+            ));
         }
-        
+
+        config.output.colorspace = libwebp_sys::WEBP_CSP_MODE::MODE_RGBA;
+        config.output.is_external_memory = 1;
+        config.output.u.RGBA.rgba = out_pixels.as_mut_ptr();
+        config.output.u.RGBA.stride = (out_rect.width * 4) as i32;
+        config.output.u.RGBA.size = out_pixels.len();
+
+        let original_width = self.info.image_width;
+        let original_height = self.info.image_height;
+
+        if in_rect.width != original_width || in_rect.height != original_height {
+            config.options.use_cropping = 1;
+            config.options.crop_left = in_rect.x as i32;
+            config.options.crop_top = in_rect.y as i32;
+            config.options.crop_width = in_rect.width as i32;
+            config.options.crop_height = in_rect.height as i32;
+        }
+
+        if out_rect.width != in_rect.width || out_rect.height != in_rect.height {
+            config.options.use_scaling = 1;
+            config.options.scaled_width = out_rect.width as i32;
+            config.options.scaled_height = out_rect.height as i32;
+        }
+
+        let status =
+            unsafe { libwebp_sys::WebPDecode(self.data.as_ptr(), self.data.len(), &mut config) };
+
+        if status != libwebp_sys::VP8StatusCode::VP8_STATUS_OK {
+            return Err(DecodeError::DecodingFailed(format!(
+                "WebP decode failed: {:?}",
+                status
+            )));
+        }
+
         Ok(())
     }
 
