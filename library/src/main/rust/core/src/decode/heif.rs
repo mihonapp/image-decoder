@@ -4,7 +4,6 @@ use crate::decode::{DecodeError, Decoder};
 use crate::resize::downsample_region;
 use crate::types::{ImageInfo, Rect};
 
-/// HEIF / AVIF decoder backed by `libheif-rs`.
 pub struct HeifDecoder {
     data: Vec<u8>,
     info: ImageInfo,
@@ -41,14 +40,29 @@ fn parse_info(data: &[u8], crop_borders: bool) -> Result<ImageInfo, DecodeError>
     let mut bounds = Rect::full(image_width, image_height);
 
     if crop_borders {
-        if let Ok(mut rgba) = decode_rgba_from_ctx(&ctx) {
-            // Convert RGBA to grayscale in-place to avoid a second allocation.
-            let pixel_count = (image_width * image_height) as usize;
-            for i in 0..pixel_count {
-                let base = i * 4;
-                rgba[i] = rgb_to_luma(rgba[base], rgba[base + 1], rgba[base + 2]);
+        let lib_heif = libheif_rs::LibHeif::new();
+        if let Ok(image) = lib_heif.decode(
+            &handle,
+            libheif_rs::ColorSpace::Rgb(libheif_rs::RgbChroma::Rgb),
+            None,
+        ) {
+            if let Some(plane) = image.planes().interleaved {
+                let stride = plane.stride as usize;
+
+                let luma: Vec<u8> = plane
+                    .data
+                    .chunks(stride)
+                    .take(image_height as usize)
+                    .flat_map(|src_row| {
+                        let valid_src_pixels = &src_row[..image_width as usize * 3];
+                        valid_src_pixels
+                            .chunks_exact(3)
+                            .map(|rgb| rgb_to_luma(rgb[0], rgb[1], rgb[2]))
+                    })
+                    .collect();
+
+                bounds = find_borders(&luma, image_width, image_height);
             }
-            bounds = find_borders(&rgba[..pixel_count], image_width, image_height);
         }
     }
 
@@ -58,42 +72,6 @@ fn parse_info(data: &[u8], crop_borders: bool) -> Result<ImageInfo, DecodeError>
         is_animated: false,
         bounds,
     })
-}
-
-fn decode_rgba_from_ctx(ctx: &libheif_rs::HeifContext) -> Result<Vec<u8>, DecodeError> {
-    let handle = ctx
-        .primary_image_handle()
-        .map_err(|e| DecodeError::DecodingFailed(format!("HEIF handle: {e}")))?;
-
-    let lib_heif = libheif_rs::LibHeif::new();
-    let image = lib_heif
-        .decode(
-            &handle,
-            libheif_rs::ColorSpace::Rgb(libheif_rs::RgbChroma::Rgba),
-            None,
-        )
-        .map_err(|e| DecodeError::DecodingFailed(format!("HEIF decode: {e}")))?;
-
-    let plane = image
-        .planes()
-        .interleaved
-        .ok_or_else(|| DecodeError::DecodingFailed("HEIF: no interleaved plane".into()))?;
-
-    let width = image.width() as usize;
-    let height = image.height() as usize;
-    let stride = plane.stride;
-
-    // Copy row-by-row to handle stride != width*4
-    let mut rgba = vec![0u8; width * height * 4];
-    for y in 0..height {
-        let src_start = y * stride;
-        let src_end = src_start + width * 4;
-        let dst_start = y * width * 4;
-        let dst_end = dst_start + width * 4;
-        rgba[dst_start..dst_end].copy_from_slice(&plane.data[src_start..src_end]);
-    }
-
-    Ok(rgba)
 }
 
 impl Decoder for HeifDecoder {
@@ -111,18 +89,53 @@ impl Decoder for HeifDecoder {
         let ctx = libheif_rs::HeifContext::read_from_bytes(&self.data)
             .map_err(|e| DecodeError::DecodingFailed(format!("HEIF: {e}")))?;
 
-        let rgba = decode_rgba_from_ctx(&ctx)?;
-        let full_width = self.info.image_width;
+        let handle = ctx
+            .primary_image_handle()
+            .map_err(|e| DecodeError::DecodingFailed(format!("HEIF handle: {e}")))?;
 
-        downsample_region(
-            &rgba,
-            full_width,
-            4,
-            in_rect,
-            out_rect,
-            sample_size,
-            out_pixels,
-        )
+        let lib_heif = libheif_rs::LibHeif::new();
+        let image = lib_heif
+            .decode(
+                &handle,
+                libheif_rs::ColorSpace::Rgb(libheif_rs::RgbChroma::Rgba),
+                None,
+            )
+            .map_err(|e| DecodeError::DecodingFailed(format!("HEIF decode: {e}")))?;
+
+        let plane = image
+            .planes()
+            .interleaved
+            .ok_or_else(|| DecodeError::DecodingFailed("HEIF: no interleaved plane".into()))?;
+
+        let width = image.width() as u32;
+        let height = image.height() as u32;
+        let stride = plane.stride as u32;
+
+        if stride == width * 4 {
+            downsample_region(
+                plane.data,
+                width,
+                4,
+                in_rect,
+                out_rect,
+                sample_size,
+                out_pixels,
+            )
+        } else {
+            let buffer_size = (width * height * 4) as usize;
+            let mut rgba = Vec::with_capacity(buffer_size);
+            unsafe {
+                rgba.set_len(buffer_size);
+                for y in 0..height as usize {
+                    let src_start = y * stride as usize;
+                    let src_end = src_start + (width * 4) as usize;
+                    let dst_start = y * (width * 4) as usize;
+                    let dst_end = dst_start + (width * 4) as usize;
+                    rgba[dst_start..dst_end].copy_from_slice(&plane.data[src_start..src_end]);
+                }
+            }
+            downsample_region(&rgba, width, 4, in_rect, out_rect, sample_size, out_pixels)
+        }
     }
 
     fn use_transform(&self) -> bool {
