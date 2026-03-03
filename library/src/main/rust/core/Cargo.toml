@@ -18,7 +18,7 @@ lcms2 = { version = "6", features = ["static"] }
 bytemuck = "1"
 
 # Downscaling
-fast_image_resize = "6"
+fast_image_resize = { version = "6", features = ["rayon"] }
 
 # Utilities
 thiserror = "2"
