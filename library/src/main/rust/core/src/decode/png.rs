@@ -56,7 +56,6 @@ fn parse_info(data: &[u8], crop_borders: bool) -> Result<ImageInfo, DecodeError>
 }
 
 /// Decode the PNG to single-channel grayscale for border detection.
-/// Uses row-by-row streaming to avoid holding a full raw buffer.
 fn decode_grayscale(data: &[u8], width: u32, height: u32) -> Result<Vec<u8>, DecodeError> {
     let mut decoder = png::Decoder::new(Cursor::new(data));
     decoder.set_transformations(png::Transformations::EXPAND | png::Transformations::STRIP_16);
@@ -68,8 +67,16 @@ fn decode_grayscale(data: &[u8], width: u32, height: u32) -> Result<Vec<u8>, Dec
     let samples = color_type.samples();
     let out_w = reader.info().width as usize;
     let out_h = reader.info().height as usize;
+    let buffer_size = (width * height) as usize;
 
-    let mut gray = vec![0u8; (width * height) as usize];
+    let mut gray = Vec::with_capacity(buffer_size);
+
+    unsafe {
+        // Evade 0 initialization
+        // The code below will not access anything but fill it all, so no accidental
+        // touching of uninitialized memory
+        gray.set_len(buffer_size);
+    }
 
     for y in 0..out_h {
         let row = reader
@@ -120,12 +127,16 @@ impl Decoder for PngDecoder {
         let samples = color_type.samples();
         let out_w = reader.info().width as usize;
         let out_h = reader.info().height as usize;
+        let buffer_size = (self.info.image_width * self.info.image_height * 4) as usize;
 
-        // Stream rows directly into the RGBA buffer — no intermediate raw
-        // buffer is allocated.  The reader's internal scratch buffer holds
-        // one decompressed row at a time.
-        let mut rgba_pixels =
-            vec![0u8; (self.info.image_width * self.info.image_height * 4) as usize];
+        let mut rgba_pixels = Vec::with_capacity(buffer_size);
+
+        unsafe {
+            // Evade 0 initialization
+            // The code below will not access anything but fill it all, so no accidental
+            // touching of uninitialized memory
+            rgba_pixels.set_len(buffer_size);
+        }
 
         for y in 0..out_h {
             let row = reader
