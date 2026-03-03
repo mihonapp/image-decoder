@@ -3,7 +3,7 @@ use crate::decode::{DecodeError, Decoder};
 use crate::resize::downsample_region;
 use crate::types::{ImageInfo, Rect};
 
-/// JPEG decoder backed by `zune-jpeg`.
+/// JPEG decoder backed by `libjpeg-turbo` via the `turbojpeg` crate.
 pub struct JpegDecoder {
     data: Vec<u8>,
     info: ImageInfo,
@@ -27,29 +27,21 @@ impl JpegDecoder {
 }
 
 fn parse_info(data: &[u8], crop_borders: bool) -> Result<ImageInfo, DecodeError> {
-    let mut decoder = zune_jpeg::JpegDecoder::new(std::io::Cursor::new(data));
-    decoder
-        .decode_headers()
+    let mut decompressor = turbojpeg::Decompressor::new()
+        .map_err(|e| DecodeError::DecodingFailed(format!("TurboJPEG init: {e}")))?;
+
+    let header = decompressor
+        .read_header(data)
         .map_err(|e| DecodeError::DecodingFailed(format!("JPEG header: {e}")))?;
 
-    let img_info = decoder
-        .info()
-        .ok_or_else(|| DecodeError::DecodingFailed("No JPEG info".into()))?;
-
-    let image_width = img_info.width as u32;
-    let image_height = img_info.height as u32;
-
+    let image_width = header.width as u32;
+    let image_height = header.height as u32;
     let mut bounds = Rect::full(image_width, image_height);
 
     if crop_borders {
-        // Decode to grayscale for border detection
-        use zune_jpeg::zune_core::colorspace::ColorSpace;
-        use zune_jpeg::zune_core::options::DecoderOptions;
-
-        let opts = DecoderOptions::default().jpeg_set_out_colorspace(ColorSpace::Luma);
-        let mut dec = zune_jpeg::JpegDecoder::new_with_options(std::io::Cursor::new(data), opts);
-        if let Ok(pixels) = dec.decode() {
-            bounds = find_borders(&pixels, image_width, image_height);
+        // Decode to grayscale (1 byte per pixel) for border detection
+        if let Ok(image) = turbojpeg::decompress(data, turbojpeg::PixelFormat::GRAY) {
+            bounds = find_borders(&image.pixels, image_width, image_height);
         }
     }
 
@@ -73,44 +65,19 @@ impl Decoder for JpegDecoder {
         in_rect: Rect,
         sample_size: u32,
     ) -> Result<(), DecodeError> {
-        // Decode the full image to RGB for faster decoding and resizing (less memory)
-        use zune_jpeg::zune_core::colorspace::ColorSpace;
-        use zune_jpeg::zune_core::options::DecoderOptions;
-
-        let opts = DecoderOptions::default().jpeg_set_out_colorspace(ColorSpace::RGB);
-        let mut decoder =
-            zune_jpeg::JpegDecoder::new_with_options(std::io::Cursor::new(&self.data), opts);
-        let pixels = decoder
-            .decode()
+        let image = turbojpeg::decompress(&self.data, turbojpeg::PixelFormat::RGBA)
             .map_err(|e| DecodeError::DecodingFailed(format!("JPEG decode: {e}")))?;
-
-        let full_width = self.info.image_width;
 
         // Extract the requested region and downsample
         downsample_region(
-            &pixels,
-            full_width,
-            3, // RGB components
+            &image.pixels,
+            self.info.image_width,
+            4,
             in_rect,
             out_rect,
             sample_size,
             out_pixels,
         )?;
-
-        // Expand RGB to RGBA in-place since Android bitmaps expect RGBA.
-        // We write the downsampled RGB into `out_pixels`, which is sized for RGBA.
-        let pixel_count = (out_rect.width * out_rect.height) as usize;
-        for i in (0..pixel_count).rev() {
-            let src_base = i * 3;
-            let dst_base = i * 4;
-            let r = out_pixels[src_base];
-            let g = out_pixels[src_base + 1];
-            let b = out_pixels[src_base + 2];
-            out_pixels[dst_base] = r;
-            out_pixels[dst_base + 1] = g;
-            out_pixels[dst_base + 2] = b;
-            out_pixels[dst_base + 3] = 255;
-        }
 
         Ok(())
     }

@@ -5,7 +5,7 @@ edition = "2021"
 
 [dependencies]
 # Image format decoders
-zune-jpeg = "0.5"
+turbojpeg = "1.4.0"
 png = "0.18"
 webp = "0.3"
 jpegxl-rs = { version = "0.13", default-features = false, features = [

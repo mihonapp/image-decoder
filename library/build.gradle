@@ -76,6 +76,19 @@ cargo {
     exec { spec, toolchain ->
         spec.environment("ANDROID_NDK_ROOT",
             android.ndkDirectory.absolutePath)
+            
+        // turbojpeg-sys builds libjpeg-turbo from source and requires CMake.
+        // We dynamically find a CMake installation within the Android SDK and add it to PATH.
+        def cmakeDirs = new File(android.sdkDirectory, "cmake").listFiles()?.findAll { new File(it, "bin/cmake").exists() }
+        if (cmakeDirs) {
+            def latestCmake = cmakeDirs.sort { it.name }.last()
+            def cmakeBin = new File(latestCmake, "bin").absolutePath
+            spec.environment("PATH", "${cmakeBin}:${System.getenv('PATH')}")
+        }
+
+        // turbojpeg-sys uses nasm to build hardware-accelerated assemblies for x86.
+        // Android's strict Position Independent Code (PIC) rules reject 32-bit x86 relocations unless we explicitly compile with PIC.
+        spec.environment("ASM_NASMFLAGS", "-DPIC")
     }
 }
 
