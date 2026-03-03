@@ -122,15 +122,25 @@ impl Decoder for HeifDecoder {
                 out_pixels,
             )
         } else {
-            let buffer_size = (width * height * 4) as usize;
+            // Multiply in usize space to prevent u32 wrap-around panic
+            let w_usize = width as usize;
+            let h_usize = height as usize;
+            let stride_usize = stride as usize;
+
+            let buffer_size = w_usize
+                .checked_mul(h_usize)
+                .and_then(|s| s.checked_mul(4))
+                .ok_or_else(|| DecodeError::DecodingFailed("HEIF dimensions overflow".into()))?;
+
             let mut rgba = Vec::with_capacity(buffer_size);
             unsafe {
                 rgba.set_len(buffer_size);
-                for y in 0..height as usize {
-                    let src_start = y * stride as usize;
-                    let src_end = src_start + (width * 4) as usize;
-                    let dst_start = y * (width * 4) as usize;
-                    let dst_end = dst_start + (width * 4) as usize;
+                for y in 0..h_usize {
+                    let src_start = y * stride_usize;
+                    let src_end = src_start + (w_usize * 4);
+                    let dst_start = y * (w_usize * 4);
+                    let dst_end = dst_start + (w_usize * 4);
+
                     rgba[dst_start..dst_end].copy_from_slice(&plane.data[src_start..src_end]);
                 }
             }
