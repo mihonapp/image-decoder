@@ -56,6 +56,7 @@ fn parse_info(data: &[u8], crop_borders: bool) -> Result<ImageInfo, DecodeError>
 }
 
 /// Decode the PNG to single-channel grayscale for border detection.
+/// Uses row-by-row streaming to avoid holding a full raw buffer.
 fn decode_grayscale(data: &[u8], width: u32, height: u32) -> Result<Vec<u8>, DecodeError> {
     let mut decoder = png::Decoder::new(Cursor::new(data));
     decoder.set_transformations(png::Transformations::EXPAND | png::Transformations::STRIP_16);
@@ -63,22 +64,23 @@ fn decode_grayscale(data: &[u8], width: u32, height: u32) -> Result<Vec<u8>, Dec
         .read_info()
         .map_err(|e| DecodeError::DecodingFailed(format!("PNG gray: {e}")))?;
 
-    let buf_size = reader
-        .output_buffer_size()
-        .ok_or_else(|| DecodeError::DecodingFailed("PNG: cannot determine buffer size".into()))?;
-    let mut buf = vec![0u8; buf_size];
-    let output_info = reader
-        .next_frame(&mut buf)
-        .map_err(|e| DecodeError::DecodingFailed(format!("PNG frame: {e}")))?;
+    let (color_type, _) = reader.output_color_type();
+    let samples = color_type.samples();
+    let out_w = reader.info().width as usize;
+    let out_h = reader.info().height as usize;
 
-    let samples = output_info.color_type.samples();
-    let out_w = output_info.width as usize;
-    let out_h = output_info.height as usize;
-    let line_size = output_info.line_size;
     let mut gray = vec![0u8; (width * height) as usize];
 
     for y in 0..out_h {
-        let src_row = &buf[y * line_size..y * line_size + out_w * samples];
+        let row = reader
+            .next_row()
+            .map_err(|e| DecodeError::DecodingFailed(format!("PNG row: {e}")))?;
+
+        let src_row = match &row {
+            Some(r) => r.data(),
+            None => break,
+        };
+
         let dst_row = &mut gray[y * out_w..(y + 1) * out_w];
 
         if samples >= 3 {
@@ -114,25 +116,27 @@ impl Decoder for PngDecoder {
             .read_info()
             .map_err(|e| DecodeError::DecodingFailed(format!("PNG: {e}")))?;
 
-        let buf_size = reader.output_buffer_size().ok_or_else(|| {
-            DecodeError::DecodingFailed("PNG: cannot determine buffer size".into())
-        })?;
-        let mut buf = vec![0u8; buf_size];
-        let output_info = reader
-            .next_frame(&mut buf)
-            .map_err(|e| DecodeError::DecodingFailed(format!("PNG frame: {e}")))?;
+        let (color_type, _) = reader.output_color_type();
+        let samples = color_type.samples();
+        let out_w = reader.info().width as usize;
+        let out_h = reader.info().height as usize;
 
-        let samples = output_info.color_type.samples();
-        let out_w = output_info.width as usize;
-        let out_h = output_info.height as usize;
-        let line_size = output_info.line_size;
-
-        // For the output we always want RGBA (4 components).
+        // Stream rows directly into the RGBA buffer — no intermediate raw
+        // buffer is allocated.  The reader's internal scratch buffer holds
+        // one decompressed row at a time.
         let mut rgba_pixels =
             vec![0u8; (self.info.image_width * self.info.image_height * 4) as usize];
 
         for y in 0..out_h {
-            let src_row = &buf[y * line_size..y * line_size + out_w * samples];
+            let row = reader
+                .next_row()
+                .map_err(|e| DecodeError::DecodingFailed(format!("PNG row: {e}")))?;
+
+            let src_row = match &row {
+                Some(r) => r.data(),
+                None => break,
+            };
+
             let dst_row = &mut rgba_pixels[y * out_w * 4..(y + 1) * out_w * 4];
 
             match samples {
@@ -163,7 +167,7 @@ impl Decoder for PngDecoder {
                     }
                 }
                 4 => {
-                    dst_row.copy_from_slice(src_row);
+                    dst_row.copy_from_slice(&src_row[..out_w * 4]);
                 }
                 _ => {}
             }
