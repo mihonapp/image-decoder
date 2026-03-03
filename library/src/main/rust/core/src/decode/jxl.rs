@@ -4,7 +4,10 @@ use crate::decode::{DecodeError, Decoder};
 use crate::resize::downsample_region;
 use crate::types::{ImageInfo, Rect};
 
-/// JPEG XL decoder backed by `jxl-oxide`.
+use jpegxl_rs::decode::{decoder_builder, PixelFormat};
+use jpegxl_rs::parallel::resizable_runner::ResizableRunner;
+
+/// JPEG XL decoder backed by libjxl via `jpegxl-rs`.
 pub struct JxlDecoder {
     data: Vec<u8>,
     info: ImageInfo,
@@ -28,12 +31,10 @@ impl JxlDecoder {
 }
 
 fn parse_info(data: &[u8], crop_borders: bool) -> Result<ImageInfo, DecodeError> {
-    let image = jxl_oxide::JxlImage::builder()
-        .read(std::io::Cursor::new(data))
-        .map_err(|e| DecodeError::DecodingFailed(format!("JXL header: {e}")))?;
+    let (metadata, _) = decode_internal(data)?;
 
-    let image_width = image.width();
-    let image_height = image.height();
+    let image_width = metadata.width;
+    let image_height = metadata.height;
 
     let mut bounds = Rect::full(image_width, image_height);
 
@@ -55,68 +56,30 @@ fn parse_info(data: &[u8], crop_borders: bool) -> Result<ImageInfo, DecodeError>
     })
 }
 
+/// Decode the JXL data using libjxl with multi-threaded parallel runner.
+/// Returns (metadata, raw pixel bytes).
+fn decode_internal(data: &[u8]) -> Result<(jpegxl_rs::decode::Metadata, Vec<u8>), DecodeError> {
+    let runner = ResizableRunner::default();
+    let decoder = decoder_builder()
+        .parallel_runner(&runner)
+        .pixel_format(PixelFormat {
+            num_channels: 4,
+            ..Default::default()
+        })
+        .build()
+        .map_err(|e| DecodeError::DecodingFailed(format!("JXL decoder init: {e}")))?;
+
+    let (metadata, pixels) = decoder
+        .decode_with::<u8>(data)
+        .map_err(|e| DecodeError::DecodingFailed(format!("JXL decode: {e}")))?;
+
+    Ok((metadata, pixels))
+}
+
 /// Decode the JXL image to an RGBA u8 buffer.
 fn decode_rgba(data: &[u8]) -> Result<Vec<u8>, DecodeError> {
-    let image = jxl_oxide::JxlImage::builder()
-        .read(std::io::Cursor::new(data))
-        .map_err(|e| DecodeError::DecodingFailed(format!("JXL: {e}")))?;
-
-    let width = image.width() as usize;
-    let height = image.height() as usize;
-
-    let render = image
-        .render_frame(0)
-        .map_err(|e| DecodeError::DecodingFailed(format!("JXL render: {e}")))?;
-
-    // Use stream() to convert directly from grid to u8, avoiding the
-    // intermediate f32 FrameBuffer allocation that image_all_channels() creates.
-    let mut stream = render.stream();
-    let num_channels = stream.channels() as usize;
-
-    if num_channels == 4 {
-        // RGBA — write directly into the output buffer.
-        let mut rgba = vec![0u8; width * height * 4];
-        stream.write_to_buffer::<u8>(&mut rgba);
-        Ok(rgba)
-    } else {
-        // Stream has fewer channels (e.g. RGB=3, Gray=1).
-        // Read into a compact buffer, then expand to RGBA.
-        let mut compact = vec![0u8; width * height * num_channels];
-        stream.write_to_buffer::<u8>(&mut compact);
-
-        let mut rgba = vec![255u8; width * height * 4];
-        match num_channels {
-            3 => {
-                for (dst, src) in rgba.chunks_exact_mut(4).zip(compact.chunks_exact(3)) {
-                    let [r, g, b] = [src[0], src[1], src[2]];
-                    dst[0] = r;
-                    dst[1] = g;
-                    dst[2] = b;
-                    // dst[3] already 255
-                }
-            }
-            1 => {
-                for (dst, &luma) in rgba.chunks_exact_mut(4).zip(compact.iter()) {
-                    dst[0] = luma;
-                    dst[1] = luma;
-                    dst[2] = luma;
-                    // dst[3] already 255
-                }
-            }
-            _ => {
-                for (dst, src) in rgba
-                    .chunks_exact_mut(4)
-                    .zip(compact.chunks_exact(num_channels))
-                {
-                    dst[0] = src[0];
-                    dst[1] = src.get(1).copied().unwrap_or(src[0]);
-                    dst[2] = src.get(2).copied().unwrap_or(src[0]);
-                    dst[3] = src.get(3).copied().unwrap_or(255);
-                }
-            }
-        }
-        Ok(rgba)
-    }
+    let (_metadata, rgba) = decode_internal(data)?;
+    Ok(rgba)
 }
 
 impl Decoder for JxlDecoder {

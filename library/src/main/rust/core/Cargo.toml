@@ -8,7 +8,9 @@ edition = "2021"
 zune-jpeg = "0.5"
 png = "0.18"
 webp = "0.3"
-jxl-oxide = "0.12"
+jpegxl-rs = { version = "0.13", default-features = false, features = [
+    "vendored",
+] }
 libheif-rs = "2"
 
 # Color management

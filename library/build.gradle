@@ -71,6 +71,12 @@ cargo {
     targets = ["arm64", "arm", "x86", "x86_64"]
     targetDirectory = "src/main/rust/target"
     profile = "release"
+
+    // jpegxl-rs vendored build needs the NDK path for its CMake cross-compilation.
+    exec { spec, toolchain ->
+        spec.environment("ANDROID_NDK_ROOT",
+            android.ndkDirectory.absolutePath)
+    }
 }
 
 afterEvaluate {
