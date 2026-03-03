@@ -7,6 +7,9 @@ use fast_image_resize as fir;
 /// dimensions, writing the result into `out_pixels`.
 ///
 /// When `sample_size == 1` this is a simple blit of the region.
+///
+/// Downsampling uses a SIMD-optimised bicubic (Catmull-Rom) filter via
+/// `fast_image_resize`.
 pub fn downsample_region(
     src_pixels: &[u8],
     src_width: u32,
@@ -16,61 +19,37 @@ pub fn downsample_region(
     sample_size: u32,
     out_pixels: &mut [u8],
 ) -> Result<(), DecodeError> {
-    let stride = src_width * components;
-    let crop_w = in_rect.width;
-    let crop_h = in_rect.height;
-    let crop_stride = crop_w * components;
+    let stride = (src_width * components) as usize;
+    let crop_stride = (in_rect.width * components) as usize;
 
-    // Check if the source rows are already contiguous in memory
-    // (no x-offset and region width == source width).
-    let is_contiguous = in_rect.x == 0 && in_rect.width == src_width;
-
-    // Get a contiguous view of the cropped region, borrowing when possible.
-    let cropped_owned: Vec<u8>;
-    let cropped: &[u8] = if is_contiguous {
-        let start = (in_rect.y * stride) as usize;
-        let end = start + (crop_h * crop_stride) as usize;
-        if end > src_pixels.len() {
-            return Err(DecodeError::InvalidRegion(
-                "source region out of bounds".into(),
-            ));
-        }
-        &src_pixels[start..end]
-    } else {
-        cropped_owned = {
-            let mut buf = vec![0u8; (crop_stride * crop_h) as usize];
-            for row in 0..crop_h {
-                let src_y = in_rect.y + row;
-                let src_start = (src_y * stride + in_rect.x * components) as usize;
-                let src_end = src_start + crop_stride as usize;
-                let dst_start = (row * crop_stride) as usize;
-                let dst_end = dst_start + crop_stride as usize;
-                if src_end > src_pixels.len() {
-                    return Err(DecodeError::InvalidRegion(format!(
-                        "source row {} out of bounds",
-                        src_y
-                    )));
-                }
-                buf[dst_start..dst_end].copy_from_slice(&src_pixels[src_start..src_end]);
+    // sample_size == 1: simple blit
+    if sample_size <= 1 || (out_rect.width == in_rect.width && out_rect.height == in_rect.height) {
+        if in_rect.x == 0 && in_rect.width == src_width {
+            let start = in_rect.y as usize * stride;
+            let len = in_rect.height as usize * crop_stride;
+            out_pixels[..len].copy_from_slice(&src_pixels[start..start + len]);
+        } else {
+            // Row-by-row copy.
+            for row in 0..in_rect.height as usize {
+                let src_start =
+                    (in_rect.y as usize + row) * stride + in_rect.x as usize * components as usize;
+                let dst_start = row * crop_stride;
+                out_pixels[dst_start..dst_start + crop_stride]
+                    .copy_from_slice(&src_pixels[src_start..src_start + crop_stride]);
             }
-            buf
-        };
-        &cropped_owned
-    };
-
-    // If no downsampling needed, just copy the cropped pixels directly.
-    if sample_size <= 1 || (out_rect.width == crop_w && out_rect.height == crop_h) {
-        let len = (out_rect.width * out_rect.height * components) as usize;
-        out_pixels[..len].copy_from_slice(&cropped[..len]);
+        }
         return Ok(());
     }
 
-    // Use fast_image_resize to scale down.
-    if crop_w == 0 || crop_h == 0 || out_rect.width == 0 || out_rect.height == 0 {
-        return Err(DecodeError::InvalidRegion("zero dimension".into()));
-    }
+    // sample_size >= 2: bicubic downsample (SIMD-optimised)
+    let crop_w = in_rect.width;
+    let crop_h = in_rect.height;
     let dst_w = out_rect.width;
     let dst_h = out_rect.height;
+
+    if crop_w == 0 || crop_h == 0 || dst_w == 0 || dst_h == 0 {
+        return Err(DecodeError::InvalidRegion("zero dimension".into()));
+    }
 
     let pixel_type = match components {
         1 => fir::PixelType::U8,
@@ -83,20 +62,41 @@ pub fn downsample_region(
         }
     };
 
-    // Use ImageRef to borrow the cropped slice, avoids cloning into a Vec.
+    // Borrow the cropped region without allocating when rows are contiguous.
+    let is_contiguous = in_rect.x == 0 && in_rect.width == src_width;
+    let cropped_owned: Vec<u8>;
+    let cropped: &[u8] = if is_contiguous {
+        let start = in_rect.y as usize * stride;
+        &src_pixels[start..start + crop_h as usize * crop_stride]
+    } else {
+        cropped_owned = {
+            let mut buf = vec![0u8; crop_h as usize * crop_stride];
+            for row in 0..crop_h as usize {
+                let src_start =
+                    (in_rect.y as usize + row) * stride + in_rect.x as usize * components as usize;
+                let dst_start = row * crop_stride;
+                buf[dst_start..dst_start + crop_stride]
+                    .copy_from_slice(&src_pixels[src_start..src_start + crop_stride]);
+            }
+            buf
+        };
+        &cropped_owned
+    };
+
     let src_image = fir::images::ImageRef::new(crop_w, crop_h, cropped, pixel_type)
         .map_err(|e| DecodeError::DecodingFailed(format!("resize src: {e}")))?;
 
-    let mut dst_image = fir::images::Image::new(dst_w, dst_h, pixel_type);
+    // Write directly into the caller's output buffer 
+    let mut dst_image = fir::images::Image::from_slice_u8(dst_w, dst_h, out_pixels, pixel_type)
+        .map_err(|e| DecodeError::DecodingFailed(format!("resize dst: {e}")))?;
+
+    let options = fir::ResizeOptions::new()
+        .resize_alg(fir::ResizeAlg::Convolution(fir::FilterType::CatmullRom));
 
     let mut resizer = fir::Resizer::new();
     resizer
-        .resize(&src_image, &mut dst_image, None)
+        .resize(&src_image, &mut dst_image, Some(&options))
         .map_err(|e| DecodeError::DecodingFailed(format!("resize: {e}")))?;
-
-    let result = dst_image.into_vec();
-    let len = (dst_w * dst_h * components) as usize;
-    out_pixels[..len].copy_from_slice(&result[..len]);
 
     Ok(())
 }
