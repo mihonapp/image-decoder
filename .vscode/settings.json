@@ -1,0 +1,7 @@
+{
+    "rust-analyzer.linkedProjects": [
+        "library/src/main/rust/core/Cargo.toml",
+        "library/src/main/rust/jni/Cargo.toml",
+        "library/src/main/rust/Cargo.toml"
+    ]
+}
