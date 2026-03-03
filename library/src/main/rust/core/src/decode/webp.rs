@@ -99,6 +99,31 @@ impl Decoder for WebpDecoder {
         in_rect: Rect,
         _sample_size: u32,
     ) -> Result<(), DecodeError> {
+        // Prevent i32 overflow for FFI parameters
+        if out_rect.width > i32::MAX as u32
+            || out_rect.height > i32::MAX as u32
+            || in_rect.width > i32::MAX as u32
+            || in_rect.height > i32::MAX as u32
+            || in_rect.x > i32::MAX as u32
+            || in_rect.y > i32::MAX as u32
+        {
+            return Err(DecodeError::InvalidRegion(
+                "Dimensions exceed maximum allowed size".into(),
+            ));
+        }
+
+        // Explicitly verify the output buffer is large enough
+        let expected_size = (out_rect.width as usize)
+            .checked_mul(out_rect.height as usize)
+            .and_then(|s| s.checked_mul(4))
+            .ok_or_else(|| DecodeError::DecodingFailed("Output dimensions overflow".into()))?;
+
+        if out_pixels.len() < expected_size {
+            return Err(DecodeError::DecodingFailed(
+                "Output buffer too small".into(),
+            ));
+        }
+
         let mut config: libwebp_sys::WebPDecoderConfig = unsafe { std::mem::zeroed() };
         if !unsafe { libwebp_sys::WebPInitDecoderConfig(&mut config) } {
             return Err(DecodeError::DecodingFailed(
@@ -110,7 +135,7 @@ impl Decoder for WebpDecoder {
         config.output.is_external_memory = 1;
         config.output.u.RGBA.rgba = out_pixels.as_mut_ptr();
         config.output.u.RGBA.stride = (out_rect.width * 4) as i32;
-        config.output.u.RGBA.size = out_pixels.len();
+        config.output.u.RGBA.size = expected_size;
 
         let original_width = self.info.image_width;
         let original_height = self.info.image_height;
@@ -131,6 +156,9 @@ impl Decoder for WebpDecoder {
 
         let status =
             unsafe { libwebp_sys::WebPDecode(self.data.as_ptr(), self.data.len(), &mut config) };
+
+        // 3. Always clean up the decoder config properly to prevent hidden C-side leaks
+        unsafe { libwebp_sys::WebPFreeDecBuffer(&mut config.output) };
 
         if status != libwebp_sys::VP8StatusCode::VP8_STATUS_OK {
             return Err(DecodeError::DecodingFailed(format!(
