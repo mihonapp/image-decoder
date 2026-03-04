@@ -190,9 +190,7 @@ fn jpeg_decode_full() {
     let out_rect = bounds;
     let pixel_count = (out_rect.width * out_rect.height * 4) as usize;
     let mut out = vec![0u8; pixel_count];
-    decoder
-        .decode(&mut out, out_rect, bounds, 1)
-        .unwrap();
+    decoder.decode(&mut out, out_rect, bounds, 1).unwrap();
     // At least some pixels should be non-zero
     assert!(out.iter().any(|&v| v != 0));
 }
