@@ -26,10 +26,7 @@ static mut IMAGE_TYPE_CTOR: jni::sys::jmethodID = std::ptr::null_mut();
 static mut CREATE_BITMAP_METHOD: jni::sys::jmethodID = std::ptr::null_mut();
 
 #[unsafe(no_mangle)]
-pub extern "system" fn JNI_OnLoad(
-    vm: *mut jni::sys::JavaVM,
-    _reserved: *mut c_void,
-) -> jint {
+pub extern "system" fn JNI_OnLoad(vm: *mut jni::sys::JavaVM, _reserved: *mut c_void) -> jint {
     android_logger::init_once(
         android_logger::Config::default()
             .with_max_level(log::LevelFilter::Warn)
@@ -37,7 +34,7 @@ pub extern "system" fn JNI_OnLoad(
     );
 
     let vm = unsafe { jni::vm::JavaVM::from_raw(vm) };
-    vm.attach_current_thread(|env| -> jni::errors::Result<()> {
+    let result = vm.attach_current_thread(|env| -> jni::errors::Result<()> {
         unsafe {
             let cls = env.find_class(jni_str!("tachiyomi/decoder/ImageDecoder"))?;
             IMAGE_DECODER_CLS = env.new_global_ref(&cls)?.into_raw();
@@ -60,10 +57,15 @@ pub extern "system" fn JNI_OnLoad(
                 .into_raw();
         }
         Ok(())
-    })
-    .expect("JNI_OnLoad failed");
+    });
 
-    jni::sys::JNI_VERSION_1_6
+    match result {
+        Ok(()) => jni::sys::JNI_VERSION_1_6,
+        Err(e) => {
+            log::error!("JNI_OnLoad failed: {e}");
+            jni::sys::JNI_ERR
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -156,11 +158,7 @@ pub extern "system" fn Java_tachiyomi_decoder_ImageDecoder_nativeNewInstance<'ca
                 None
             };
 
-            let decoder = match decode::new_decoder(
-                data,
-                crop_borders,
-                target_profile.as_deref(),
-            ) {
+            let decoder = match decode::new_decoder(data, crop_borders, target_profile.as_deref()) {
                 Ok(d) => d,
                 Err(e) => {
                     log::error!("Failed to create decoder: {e}");
@@ -252,9 +250,8 @@ pub extern "system" fn Java_tachiyomi_decoder_ImageDecoder_nativeDecode<'caller>
             }
 
             let pixel_count = (out_rect.width * out_rect.height) as usize;
-            let out_slice = unsafe {
-                std::slice::from_raw_parts_mut(pixels_ptr as *mut u8, pixel_count * 4)
-            };
+            let out_slice =
+                unsafe { std::slice::from_raw_parts_mut(pixels_ptr as *mut u8, pixel_count * 4) };
 
             match decoder.decode(out_slice, out_rect, in_rect, sample_size as u32) {
                 Ok(()) => {}
