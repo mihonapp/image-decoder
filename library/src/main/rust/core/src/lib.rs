@@ -2,6 +2,7 @@ pub mod borders;
 pub mod color;
 pub mod decode;
 pub mod format;
+pub mod icc;
 pub mod resize;
 pub mod types;
 
