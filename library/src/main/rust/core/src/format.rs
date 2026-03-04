@@ -22,11 +22,10 @@ pub fn detect(header: &[u8]) -> Option<ImageType> {
         });
     }
     if is_webp(header) {
-        // We don't inspect animation flag here (would need full file);
-        // default to false.
+        let is_animated = webp_is_animated(header);
         return Some(ImageType {
             format: Format::Webp,
-            is_animated: false,
+            is_animated,
         });
     }
     if is_gif(header) {
@@ -74,6 +73,25 @@ fn is_png(data: &[u8]) -> bool {
 
 fn is_webp(data: &[u8]) -> bool {
     data.len() >= 4 && data[0] == b'R' && data[1] == b'I' && data[2] == b'F' && data[3] == b'F'
+}
+
+/// Check if a WebP file is animated by inspecting the VP8X chunk.
+///
+/// The VP8X extended header (if present) starts at byte 12 of the RIFF
+/// container: `"VP8X"` fourcc + 4-byte little-endian size + flags byte.
+/// Bit 1 of the flags byte indicates animation.
+fn webp_is_animated(data: &[u8]) -> bool {
+    // Need at least: RIFF(4) + size(4) + WEBP(4) + VP8X(4) + size(4) + flags(1) = 21 bytes
+    if data.len() < 21 {
+        return false;
+    }
+    // First sub-chunk must be VP8X for the animation flag to exist.
+    if &data[12..16] != b"VP8X" {
+        return false;
+    }
+    // Flags byte is at offset 20 (after VP8X fourcc + 4-byte chunk size).
+    // Bit 1 (0x02) = animation flag.
+    data[20] & 0x02 != 0
 }
 
 fn is_gif(data: &[u8]) -> bool {

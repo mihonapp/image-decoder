@@ -1,12 +1,13 @@
 use crate::borders::find_borders;
-use crate::color::rgb_to_luma;
+use crate::color::{rgb_to_luma, transform_pixels};
 use crate::decode::{DecodeError, Decoder};
+use crate::icc::extract_webp_icc;
 use crate::types::{ImageInfo, Rect};
 
 pub struct WebpDecoder {
     data: Vec<u8>,
     info: ImageInfo,
-    #[allow(dead_code)]
+    source_profile_data: Option<Vec<u8>>,
     target_profile_data: Option<Vec<u8>>,
 }
 
@@ -17,9 +18,11 @@ impl WebpDecoder {
         target_profile: Option<&[u8]>,
     ) -> Result<Self, DecodeError> {
         let info = parse_info(&data, crop_borders)?;
+        let source_profile_data = extract_webp_icc(&data);
         Ok(Self {
             data,
             info,
+            source_profile_data,
             target_profile_data: target_profile.map(|p| p.to_vec()),
         })
     }
@@ -46,6 +49,10 @@ fn parse_info(data: &[u8], crop_borders: bool) -> Result<ImageInfo, DecodeError>
 
     let image_width = image_width as u32;
     let image_height = image_height as u32;
+    super::check_dimensions(image_width, image_height)?;
+    let is_animated = crate::format::detect(data)
+        .map(|t| t.is_animated)
+        .unwrap_or(false);
     let mut bounds = Rect::full(image_width, image_height);
 
     if crop_borders {
@@ -70,7 +77,7 @@ fn parse_info(data: &[u8], crop_borders: bool) -> Result<ImageInfo, DecodeError>
     Ok(ImageInfo {
         image_width,
         image_height,
-        is_animated: false,
+        is_animated,
         bounds,
     })
 }
@@ -155,11 +162,22 @@ impl Decoder for WebpDecoder {
             )));
         }
 
+        // Apply ICC colour transform if the source has an embedded profile.
+        if let Some(ref src_icc) = self.source_profile_data {
+            let pixel_count = (out_rect.width * out_rect.height) as usize;
+            transform_pixels(
+                out_pixels,
+                pixel_count,
+                Some(src_icc),
+                self.target_profile_data.as_deref(),
+            )?;
+        }
+
         Ok(())
     }
 
     fn use_transform(&self) -> bool {
-        false
+        self.source_profile_data.is_some()
     }
 
     fn lcms_in_type(&self) -> u32 {
