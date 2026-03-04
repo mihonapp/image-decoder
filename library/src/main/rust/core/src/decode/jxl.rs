@@ -1,5 +1,5 @@
 use crate::borders::find_borders;
-use crate::color::rgb_to_luma;
+use crate::color::{rgb_to_luma, transform_pixels};
 use crate::decode::{DecodeError, Decoder};
 use crate::resize::downsample_region;
 use crate::types::{ImageInfo, Rect};
@@ -11,7 +11,7 @@ use jpegxl_rs::parallel::resizable_runner::ResizableRunner;
 pub struct JxlDecoder {
     data: Vec<u8>,
     info: ImageInfo,
-    #[allow(dead_code)]
+    source_profile_data: Option<Vec<u8>>,
     target_profile_data: Option<Vec<u8>>,
 }
 
@@ -22,12 +22,20 @@ impl JxlDecoder {
         target_profile: Option<&[u8]>,
     ) -> Result<Self, DecodeError> {
         let info = parse_info(&data, crop_borders)?;
+        let source_profile_data = extract_jxl_icc(&data);
         Ok(Self {
             data,
             info,
+            source_profile_data,
             target_profile_data: target_profile.map(|p| p.to_vec()),
         })
     }
+}
+
+/// Extract ICC profile from a JXL image via jpegxl-rs metadata.
+fn extract_jxl_icc(data: &[u8]) -> Option<Vec<u8>> {
+    let (metadata, _pixels) = decode_internal(data).ok()?;
+    metadata.icc_profile
 }
 
 /// Read only the JXL basic info (width, height) from the header without
@@ -93,6 +101,7 @@ fn read_basic_info(data: &[u8]) -> Result<(u32, u32), DecodeError> {
 
 fn parse_info(data: &[u8], crop_borders: bool) -> Result<ImageInfo, DecodeError> {
     let (image_width, image_height) = read_basic_info(data)?;
+    super::check_dimensions(image_width, image_height)?;
 
     let mut bounds = Rect::full(image_width, image_height);
 
@@ -166,11 +175,24 @@ impl Decoder for JxlDecoder {
             out_rect,
             sample_size,
             out_pixels,
-        )
+        )?;
+
+        // Apply ICC colour transform if the source has an embedded profile.
+        if let Some(ref src_icc) = self.source_profile_data {
+            let pixel_count = (out_rect.width * out_rect.height) as usize;
+            transform_pixels(
+                out_pixels,
+                pixel_count,
+                Some(src_icc),
+                self.target_profile_data.as_deref(),
+            )?;
+        }
+
+        Ok(())
     }
 
     fn use_transform(&self) -> bool {
-        false
+        self.source_profile_data.is_some()
     }
 
     fn lcms_in_type(&self) -> u32 {
