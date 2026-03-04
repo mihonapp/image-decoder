@@ -15,6 +15,7 @@ import org.junit.Test
 import org.junit.runner.RunWith
 import tachiyomi.decoder.CppImageDecoder
 import tachiyomi.decoder.ImageDecoder
+import tachiyomi.decoder.ImageDecoderConfig
 
 /**
  * Microbenchmarks that compare the **Rust** [ImageDecoder] against the **original C++**
@@ -49,6 +50,7 @@ class DecodeBenchmark {
 
     @Before
     fun setUp() {
+        ImageDecoderConfig.setBackend(ImageDecoderConfig.Backend.RUST)
         context = ApplicationProvider.getApplicationContext()
         loadOrGenerate("jpg")
         loadOrGenerate("png")
