@@ -9,9 +9,10 @@ import kotlin.concurrent.read
 import kotlin.concurrent.write
 
 /**
- * Mirror of [ImageDecoder] that loads the **original C++ decoder** from `libimagedecoder_cpp.so`.
- * All JNI entry points in that library are registered under this class name
- * (`tachiyomi.decoder.CppImageDecoder`) so both decoders can coexist in the same process.
+ * Mirror of [ImageDecoder] that loads the **original C++ decoder** from
+ * `libimagedecoder_cppbench.so`. All JNI entry points in that library are registered under this
+ * class name (`tachiyomi.decoder.CppImageDecoder`) so both decoders can coexist in the same
+ * process.
  *
  * Used exclusively for benchmarking – not part of the public API.
  */
@@ -107,7 +108,7 @@ private constructor(private val nativePtr: Long, val width: Int, val height: Int
     companion object {
         init {
             System.loadLibrary("heifcodec")
-            System.loadLibrary("imagedecoder_cpp")
+            System.loadLibrary("imagedecoder_cppbench")
         }
 
         fun newInstance(

@@ -20,7 +20,7 @@ add_library(imagedecoder SHARED
   ../borders.cpp
   ../row_convert.cpp
 )
-set_target_properties(imagedecoder PROPERTIES OUTPUT_NAME "imagedecoder_cpp")
+set_target_properties(imagedecoder PROPERTIES OUTPUT_NAME "imagedecoder_cppbench")
 
 target_include_directories(imagedecoder PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/..)
 
