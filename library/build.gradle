@@ -41,19 +41,27 @@ android {
         jvmTarget = '1.8'
     }
 
-    // Build the heif codec bundle (libheifcodec.so) for each ABI via CMake.
-    // The CMakeLists.txt outputs the .so directly into src/main/rust/native-libs/{ABI}/
-    // so it is packaged by Android via jniLibs.srcDirs and
-    // visible to the Rust cross-linker at the fixed path in .cargo/config.toml.
+    // Build heifcodec (libheifcodec.so) and the C++ image decoder
+    // (libimagedecoder_cpp.so) for each ABI via CMake.
+    // The root CMakeLists.txt includes both sub-projects:
+    //   - heifcodec:   libheif + codecs bundle (shared by C++ and Rust backends)
+    //   - cppdecoder:  legacy C++ image decoder (libimagedecoder_cpp.so)
     externalNativeBuild {
         cmake {
-            path "src/main/cpp/heifcodec/CMakeLists.txt"
+            path "src/main/cpp/native/CMakeLists.txt"
         }
     }
 
     sourceSets {
         main {
-            jniLibs.srcDirs += ['src/main/rust/native-libs']
+            // Note: native-libs/ is noy listed here as libheifcodec.so is
+            // automatically packaged by AGP from the CMake build output.
+            // native-libs/ exists only so the Rust cross-linker can find
+            // libheifcodec.so at build time (see .cargo/config.toml).
+            //
+            // Uncomment the following once the C++ decoder is removed and libheifcodec.so 
+            // is the only native library:
+            // jniLibs.srcDirs += ['src/main/rust/native-libs']
         }
     }
 
