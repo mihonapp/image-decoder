@@ -1,6 +1,7 @@
 use crate::borders::find_borders;
-use crate::color::rgb_to_luma;
+use crate::color::{rgb_to_luma, transform_pixels};
 use crate::decode::{DecodeError, Decoder};
+use crate::icc::extract_png_icc;
 use crate::resize::downsample_region;
 use crate::types::{ImageInfo, Rect};
 use std::io::Cursor;
@@ -9,7 +10,7 @@ use std::io::Cursor;
 pub struct PngDecoder {
     data: Vec<u8>,
     info: ImageInfo,
-    #[allow(dead_code)]
+    source_profile_data: Option<Vec<u8>>,
     target_profile_data: Option<Vec<u8>>,
 }
 
@@ -20,9 +21,11 @@ impl PngDecoder {
         target_profile: Option<&[u8]>,
     ) -> Result<Self, DecodeError> {
         let info = parse_info(&data, crop_borders)?;
+        let source_profile_data = extract_png_icc(&data);
         Ok(Self {
             data,
             info,
+            source_profile_data,
             target_profile_data: target_profile.map(|p| p.to_vec()),
         })
     }
@@ -37,6 +40,7 @@ fn parse_info(data: &[u8], crop_borders: bool) -> Result<ImageInfo, DecodeError>
 
     let image_width = png_info.width;
     let image_height = png_info.height;
+    super::check_dimensions(image_width, image_height)?;
 
     let mut bounds = Rect::full(image_width, image_height);
 
@@ -155,11 +159,24 @@ impl Decoder for PngDecoder {
             out_rect,
             sample_size,
             out_pixels,
-        )
+        )?;
+
+        // Apply ICC colour transform if the source has an embedded profile.
+        if let Some(ref src_icc) = self.source_profile_data {
+            let pixel_count = (out_rect.width * out_rect.height) as usize;
+            transform_pixels(
+                out_pixels,
+                pixel_count,
+                Some(src_icc),
+                self.target_profile_data.as_deref(),
+            )?;
+        }
+
+        Ok(())
     }
 
     fn use_transform(&self) -> bool {
-        false
+        self.source_profile_data.is_some()
     }
 
     fn lcms_in_type(&self) -> u32 {
