@@ -7,6 +7,22 @@ pub mod webp;
 use crate::types::{ImageInfo, Rect};
 use thiserror::Error;
 
+/// Maximum number of decoded pixels allowed before we reject the image as
+/// oversized. This prevents OOM on maliciously crafted headers.
+/// 256 megapixels ≈ 1 GiB of RGBA data.
+pub const MAX_PIXEL_COUNT: u64 = 256 * 1024 * 1024;
+
+/// Check that `width × height` does not exceed [`MAX_PIXEL_COUNT`].
+pub fn check_dimensions(width: u32, height: u32) -> Result<(), DecodeError> {
+    let pixels = width as u64 * height as u64;
+    if pixels > MAX_PIXEL_COUNT || width == 0 || height == 0 {
+        return Err(DecodeError::DecodingFailed(format!(
+            "Image dimensions {width}×{height} ({pixels} px) exceed safety limit"
+        )));
+    }
+    Ok(())
+}
+
 /// Errors that can occur during image decoding.
 #[derive(Error, Debug)]
 pub enum DecodeError {
