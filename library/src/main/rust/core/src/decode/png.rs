@@ -65,41 +65,30 @@ fn decode_grayscale(data: &[u8], width: u32, height: u32) -> Result<Vec<u8>, Dec
 
     let (color_type, _) = reader.output_color_type();
     let samples = color_type.samples();
-    let out_w = reader.info().width as usize;
     let out_h = reader.info().height as usize;
     let buffer_size = (width * height) as usize;
 
-    let mut gray = Vec::with_capacity(buffer_size);
-
-    unsafe {
-        // Evade 0 initialization
-        // The code below will not access anything but fill it all, so no accidental
-        // touching of uninitialized memory
-        gray.set_len(buffer_size);
-    }
-
-    for y in 0..out_h {
-        let row = reader
-            .next_row()
-            .map_err(|e| DecodeError::DecodingFailed(format!("PNG row: {e}")))?;
-
-        let src_row = match &row {
-            Some(r) => r.data(),
-            None => break,
-        };
-
-        let dst_row = &mut gray[y * out_w..(y + 1) * out_w];
-
-        if samples >= 3 {
-            for (dst, src) in dst_row.iter_mut().zip(src_row.chunks_exact(samples)) {
-                *dst = rgb_to_luma(src[0], src[1], src[2]);
+    let gray: Vec<u8> = std::iter::from_fn(|| match reader.next_row() {
+        Ok(Some(row)) => Some(Ok(row.data().to_vec())),
+        Ok(None) => None,
+        Err(e) => Some(Err(DecodeError::DecodingFailed(format!("PNG row: {e}")))),
+    })
+    .take(out_h)
+    .try_fold(
+        Vec::with_capacity(buffer_size),
+        |mut acc, row_result| -> Result<_, DecodeError> {
+            let src = row_result?;
+            if samples >= 3 {
+                acc.extend(
+                    src.chunks_exact(samples)
+                        .map(|p| rgb_to_luma(p[0], p[1], p[2])),
+                );
+            } else {
+                acc.extend(src.chunks_exact(samples).map(|p| p[0]));
             }
-        } else {
-            for (dst, src) in dst_row.iter_mut().zip(src_row.chunks_exact(samples)) {
-                *dst = src[0];
-            }
-        }
-    }
+            Ok(acc)
+        },
+    )?;
 
     Ok(gray)
 }
@@ -129,60 +118,34 @@ impl Decoder for PngDecoder {
         let out_h = reader.info().height as usize;
         let buffer_size = (self.info.image_width * self.info.image_height * 4) as usize;
 
-        let mut rgba_pixels = Vec::with_capacity(buffer_size);
-
-        unsafe {
-            // Evade 0 initialization
-            // The code below will not access anything but fill it all, so no accidental
-            // touching of uninitialized memory
-            rgba_pixels.set_len(buffer_size);
-        }
-
-        for y in 0..out_h {
-            let row = reader
-                .next_row()
-                .map_err(|e| DecodeError::DecodingFailed(format!("PNG row: {e}")))?;
-
-            let src_row = match &row {
-                Some(r) => r.data(),
-                None => break,
-            };
-
-            let dst_row = &mut rgba_pixels[y * out_w * 4..(y + 1) * out_w * 4];
-
-            match samples {
-                1 => {
-                    for (dst, &luma) in dst_row.chunks_exact_mut(4).zip(src_row.iter()) {
-                        dst[0] = luma;
-                        dst[1] = luma;
-                        dst[2] = luma;
-                        dst[3] = 255;
-                    }
+        let rgba_pixels: Vec<u8> = std::iter::from_fn(|| match reader.next_row() {
+            Ok(Some(row)) => Some(Ok(row.data().to_vec())),
+            Ok(None) => None,
+            Err(e) => Some(Err(DecodeError::DecodingFailed(format!("PNG row: {e}")))),
+        })
+        .take(out_h)
+        .try_fold(
+            Vec::with_capacity(buffer_size),
+            |mut acc, row_result| -> Result<_, DecodeError> {
+                let src_row = row_result?;
+                match samples {
+                    1 => acc.extend(src_row.iter().flat_map(|&luma| [luma, luma, luma, 255])),
+                    2 => acc.extend(
+                        src_row
+                            .chunks_exact(2)
+                            .flat_map(|s| [s[0], s[0], s[0], s[1]]),
+                    ),
+                    3 => acc.extend(
+                        src_row
+                            .chunks_exact(3)
+                            .flat_map(|s| [s[0], s[1], s[2], 255]),
+                    ),
+                    4 => acc.extend_from_slice(&src_row[..out_w * 4]),
+                    _ => {}
                 }
-                2 => {
-                    for (dst, src) in dst_row.chunks_exact_mut(4).zip(src_row.chunks_exact(2)) {
-                        let [luma, alpha] = [src[0], src[1]];
-                        dst[0] = luma;
-                        dst[1] = luma;
-                        dst[2] = luma;
-                        dst[3] = alpha;
-                    }
-                }
-                3 => {
-                    for (dst, src) in dst_row.chunks_exact_mut(4).zip(src_row.chunks_exact(3)) {
-                        let [r, g, b] = [src[0], src[1], src[2]];
-                        dst[0] = r;
-                        dst[1] = g;
-                        dst[2] = b;
-                        dst[3] = 255;
-                    }
-                }
-                4 => {
-                    dst_row.copy_from_slice(&src_row[..out_w * 4]);
-                }
-                _ => {}
-            }
-        }
+                Ok(acc)
+            },
+        )?;
 
         downsample_region(
             &rgba_pixels,
