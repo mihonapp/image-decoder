@@ -52,25 +52,13 @@ fn parse_info(data: &[u8], crop_borders: bool) -> Result<ImageInfo, DecodeError>
         let decoder = webp::Decoder::new(data);
         if let Some(image) = decoder.decode() {
             let is_alpha = image.is_alpha();
-            let pixel_count = (image_width * image_height) as usize;
-
-            let mut gray_buf = Vec::with_capacity(pixel_count);
-            unsafe {
-                gray_buf.set_len(pixel_count);
-            }
 
             let src_raw = &*image;
-            if is_alpha {
-                for i in 0..pixel_count {
-                    let base = i * 4;
-                    gray_buf[i] = rgb_to_luma(src_raw[base], src_raw[base + 1], src_raw[base + 2]);
-                }
-            } else {
-                for i in 0..pixel_count {
-                    let base = i * 3;
-                    gray_buf[i] = rgb_to_luma(src_raw[base], src_raw[base + 1], src_raw[base + 2]);
-                }
-            }
+            let chunk_size = if is_alpha { 4 } else { 3 };
+            let gray_buf: Vec<u8> = src_raw
+                .chunks_exact(chunk_size)
+                .map(|p| rgb_to_luma(p[0], p[1], p[2]))
+                .collect();
             bounds = find_borders(&gray_buf, image_width, image_height);
         } else {
             return Err(DecodeError::DecodingFailed(
