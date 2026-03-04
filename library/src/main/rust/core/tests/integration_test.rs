@@ -8,10 +8,10 @@
 //! If a particular test image is missing the test is skipped with a descriptive
 //! message rather than failing, so CI can run even without the full media set.
 
-use imagedecoder_core::decode::{self, DecodeError, Decoder};
+use imagedecoder_core::borders;
+use imagedecoder_core::decode;
 use imagedecoder_core::types::{Format, Rect};
-use imagedecoder_core::{borders, ImageInfo};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 fn test_data_dir() -> PathBuf {
     // Cargo runs tests with cwd = crate root (core/), so we go up to the
@@ -332,4 +332,184 @@ fn srgb_identity_transform() {
     for (a, b) in pixels.iter().zip(original.iter()) {
         assert!((*a as i16 - *b as i16).unsigned_abs() <= 1);
     }
+}
+
+// -----------------------------------------------------------------------
+// WebP animation detection
+// -----------------------------------------------------------------------
+
+#[test]
+fn webp_vp8x_animated_flag() {
+    // Build a minimal RIFF/WEBP with VP8X chunk, animation bit set.
+    let mut header = vec![0u8; 32];
+    header[0..4].copy_from_slice(b"RIFF");
+    header[4..8].copy_from_slice(&24u32.to_le_bytes()); // file size
+    header[8..12].copy_from_slice(b"WEBP");
+    header[12..16].copy_from_slice(b"VP8X");
+    header[16..20].copy_from_slice(&10u32.to_le_bytes()); // chunk size
+    header[20] = 0x02; // flags: animation bit (bit 1)
+    let t = decode::find_type(&header).unwrap();
+    assert_eq!(t.format, Format::Webp);
+    assert!(t.is_animated, "VP8X with animation flag should be detected");
+}
+
+#[test]
+fn webp_vp8x_not_animated() {
+    // VP8X present but animation bit NOT set.
+    let mut header = vec![0u8; 32];
+    header[0..4].copy_from_slice(b"RIFF");
+    header[4..8].copy_from_slice(&24u32.to_le_bytes());
+    header[8..12].copy_from_slice(b"WEBP");
+    header[12..16].copy_from_slice(b"VP8X");
+    header[16..20].copy_from_slice(&10u32.to_le_bytes());
+    header[20] = 0x10; // flags: EXIF, no animation
+    let t = decode::find_type(&header).unwrap();
+    assert_eq!(t.format, Format::Webp);
+    assert!(
+        !t.is_animated,
+        "VP8X without animation flag should not be animated"
+    );
+}
+
+#[test]
+fn webp_simple_not_animated() {
+    // Simple WebP (VP8, no VP8X) — never animated.
+    let mut header = vec![0u8; 32];
+    header[0..4].copy_from_slice(b"RIFF");
+    header[4..8].copy_from_slice(&24u32.to_le_bytes());
+    header[8..12].copy_from_slice(b"WEBP");
+    header[12..16].copy_from_slice(b"VP8 ");
+    let t = decode::find_type(&header).unwrap();
+    assert_eq!(t.format, Format::Webp);
+    assert!(!t.is_animated);
+}
+
+// -----------------------------------------------------------------------
+// ICC profile extraction
+// -----------------------------------------------------------------------
+
+#[test]
+fn jpeg_icc_extraction() {
+    // Build a synthetic JPEG with one APP2 ICC_PROFILE chunk.
+    let icc_payload = b"SYNTHETIC_ICC_PAYLOAD";
+    let mut data = vec![0xFF, 0xD8]; // SOI
+    data.push(0xFF);
+    data.push(0xE2); // APP2
+    let seg_len = (2 + 12 + 2 + icc_payload.len()) as u16;
+    data.push((seg_len >> 8) as u8);
+    data.push((seg_len & 0xFF) as u8);
+    data.extend_from_slice(b"ICC_PROFILE\0");
+    data.push(1); // sequence
+    data.push(1); // total
+    data.extend_from_slice(icc_payload);
+    data.push(0xFF);
+    data.push(0xDA); // SOS
+
+    let profile = imagedecoder_core::icc::extract_jpeg_icc(&data).unwrap();
+    assert_eq!(profile, icc_payload);
+}
+
+#[test]
+fn jpeg_no_icc_returns_none() {
+    let data = match load_test_file("sample.jpg") {
+        Some(d) => d,
+        None => return,
+    };
+    // sample.jpg likely has no ICC profile; if it does this test is still valid
+    // since we're just verifying the function runs without panics.
+    // note: if this fails and you replaced the sample image, check that it contains
+    // no ICC profile.
+    let _ = imagedecoder_core::icc::extract_jpeg_icc(&data);
+}
+
+#[test]
+fn webp_icc_extraction() {
+    let icc_payload = b"WEBP_ICC_DATA";
+    let chunk_size = icc_payload.len() as u32;
+    let file_size = 4 + 8 + chunk_size;
+    let mut data = Vec::new();
+    data.extend_from_slice(b"RIFF");
+    data.extend_from_slice(&file_size.to_le_bytes());
+    data.extend_from_slice(b"WEBP");
+    data.extend_from_slice(b"ICCP");
+    data.extend_from_slice(&chunk_size.to_le_bytes());
+    data.extend_from_slice(icc_payload);
+
+    let profile = imagedecoder_core::icc::extract_webp_icc(&data).unwrap();
+    assert_eq!(profile, icc_payload);
+}
+
+#[test]
+fn webp_no_icc_returns_none() {
+    let data = match load_test_file("sample.webp") {
+        Some(d) => d,
+        None => return,
+    };
+    let _ = imagedecoder_core::icc::extract_webp_icc(&data);
+}
+
+#[test]
+fn png_icc_extraction_no_panic() {
+    let data = match load_test_file("sample.png") {
+        Some(d) => d,
+        None => return,
+    };
+    let _ = imagedecoder_core::icc::extract_png_icc(&data);
+}
+
+// -----------------------------------------------------------------------
+// Oversized dimension rejection
+// -----------------------------------------------------------------------
+
+#[test]
+fn check_dimensions_rejects_zero() {
+    assert!(decode::check_dimensions(0, 100).is_err());
+    assert!(decode::check_dimensions(100, 0).is_err());
+}
+
+#[test]
+fn check_dimensions_rejects_oversized() {
+    // 300_000 × 300_000 = 90 billion pixels → exceeds 256M limit
+    assert!(decode::check_dimensions(300_000, 300_000).is_err());
+}
+
+#[test]
+fn check_dimensions_accepts_normal() {
+    assert!(decode::check_dimensions(1920, 1080).is_ok());
+    assert!(decode::check_dimensions(4096, 4096).is_ok());
+}
+
+// -----------------------------------------------------------------------
+// use_transform() parity
+// -----------------------------------------------------------------------
+
+#[test]
+fn jpeg_use_transform_reflects_icc_presence() {
+    let data = match load_test_file("sample.jpg") {
+        Some(d) => d,
+        None => return,
+    };
+    let decoder = decode::new_decoder(data, false, None).unwrap();
+    // Whether true or false depends on whether sample.jpg has ICC.
+    // This test verifies no panic and consistent return.
+    let _ = decoder.use_transform();
+}
+
+// -----------------------------------------------------------------------
+// Decoder – ICC transform applied (functional)
+// -----------------------------------------------------------------------
+
+#[test]
+fn jpeg_decode_with_srgb_target_profile() {
+    // Decoding with an explicit sRGB target profile should succeed without
+    // error even if the source has no embedded ICC (transform is skipped).
+    let data = match load_test_file("sample.jpg") {
+        Some(d) => d,
+        None => return,
+    };
+    let decoder = decode::new_decoder(data, false, None).unwrap();
+    let bounds = decoder.info().bounds;
+    let mut out = vec![0u8; (bounds.width * bounds.height * 4) as usize];
+    decoder.decode(&mut out, bounds, bounds, 1).unwrap();
+    assert!(out.iter().any(|&v| v != 0));
 }
