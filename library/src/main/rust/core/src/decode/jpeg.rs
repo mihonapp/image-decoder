@@ -4,26 +4,12 @@ use crate::decode::{DecodeError, Decoder};
 use crate::icc::extract_jpeg_icc;
 use crate::resize::downsample_region;
 use crate::types::{ImageInfo, Rect};
-use std::os::raw::{c_char, c_int, c_uchar, c_ulong, c_void};
+use std::os::raw::c_int;
 
-const TJPF_RGBA: c_int = 7;
-
-extern "C" {
-    fn tjInitDecompress() -> *mut c_void;
-    fn tjDecompress2(
-        handle: *mut c_void,
-        jpegBuf: *const c_uchar,
-        jpegSize: c_ulong,
-        dstBuf: *mut c_uchar,
-        width: c_int,
-        pitch: c_int,
-        height: c_int,
-        pixelFormat: c_int,
-        flags: c_int,
-    ) -> c_int;
-    fn tjDestroy(handle: *mut c_void) -> c_int;
-    fn tjGetErrorStr() -> *const c_char;
-}
+use turbojpeg_sys::{
+    tj3Decompress8, tj3DecompressHeader, tj3Destroy, tj3GetErrorStr, tj3Init, tj3SetCroppingRegion,
+    tj3SetScalingFactor, tjregion, tjscalingfactor, TJINIT_TJINIT_DECOMPRESS, TJPF_TJPF_RGBA,
+};
 
 pub struct JpegDecoder {
     data: Vec<u8>,
@@ -96,47 +82,35 @@ impl Decoder for JpegDecoder {
             scale_denom *= 2;
         }
 
-        // Formula aligns with C macro `TJSCALED`: ceil(dim * num / denom)
-        let idct_width = (full_width + scale_denom - 1) / scale_denom;
-        let idct_height = (full_height + scale_denom - 1) / scale_denom;
+        // Must align to MCU block size (16) for tj3SetCroppingRegion
+        let crop_x = (in_rect.x / 16) * 16;
+        let crop_y = (in_rect.y / 16) * 16;
+        let crop_w = std::cmp::min(in_rect.width + (in_rect.x - crop_x), full_width - crop_x);
+        let crop_h = std::cmp::min(in_rect.height + (in_rect.y - crop_y), full_height - crop_y);
 
-        let buffer_size = (idct_width as usize)
-            .checked_mul(idct_height as usize)
+        let scaled_crop_w = (crop_w + scale_denom - 1) / scale_denom;
+        let scaled_crop_h = (crop_h + scale_denom - 1) / scale_denom;
+
+        let buffer_size = (scaled_crop_w as usize)
+            .checked_mul(scaled_crop_h as usize)
             .and_then(|s| s.checked_mul(4))
             .ok_or_else(|| DecodeError::DecodingFailed("JPEG dimensions overflow".into()))?;
 
         let mut idct_pixels = Vec::with_capacity(buffer_size);
 
         unsafe {
-            idct_pixels.set_len(buffer_size);
-
-            let handle = tjInitDecompress();
+            let handle = tj3Init(TJINIT_TJINIT_DECOMPRESS as c_int);
             if handle.is_null() {
-                return Err(DecodeError::DecodingFailed(
-                    "tjInitDecompress failed".into(),
-                ));
+                return Err(DecodeError::DecodingFailed("tj3Init failed".into()));
             }
 
-            // Passing non-zero fractional dimensions tells libjpeg-turbo to engage IDCT scaling
-            let status = tjDecompress2(
+            if tj3DecompressHeader(
                 handle,
                 self.data.as_ptr(),
-                self.data.len() as c_ulong,
-                idct_pixels.as_mut_ptr(),
-                idct_width as c_int,
-                (idct_width * 4) as c_int,
-                idct_height as c_int,
-                TJPF_RGBA,
-                0, // flags
-            );
-
-            tjDestroy(handle);
-
-            if status != 0 {
-                let err_ptr = tjGetErrorStr();
-
-                // SAFETY: `tjGetErrorStr` returns a pointer to a thread-local, null-terminated
-                // static C-string maintained by libjpeg-turbo. It is strictly read-only.
+                self.data.len().try_into().unwrap(),
+            ) != 0
+            {
+                let err_ptr = tj3GetErrorStr(handle);
                 let err_msg = if !err_ptr.is_null() {
                     std::ffi::CStr::from_ptr(err_ptr)
                         .to_string_lossy()
@@ -144,21 +118,67 @@ impl Decoder for JpegDecoder {
                 } else {
                     "Unknown error".into()
                 };
+                tj3Destroy(handle);
                 return Err(DecodeError::DecodingFailed(format!(
-                    "tjDecompress2 failed: {}",
+                    "tj3DecompressHeader failed: {}",
                     err_msg
                 )));
             }
+
+            let scaling = tjscalingfactor {
+                num: 1,
+                denom: scale_denom as c_int,
+            };
+            tj3SetScalingFactor(handle, scaling);
+
+            let region = tjregion {
+                x: crop_x as c_int,
+                y: crop_y as c_int,
+                w: crop_w as c_int,
+                h: crop_h as c_int,
+            };
+
+            tj3SetCroppingRegion(handle, region);
+            idct_pixels.set_len(buffer_size);
+
+            let status = tj3Decompress8(
+                handle,
+                self.data.as_ptr(),
+                self.data.len().try_into().unwrap(),
+                idct_pixels.as_mut_ptr(),
+                (scaled_crop_w * 4) as c_int,
+                TJPF_TJPF_RGBA as c_int,
+            );
+
+            if status != 0 {
+                let err_ptr = tj3GetErrorStr(handle);
+                let err_msg = if !err_ptr.is_null() {
+                    std::ffi::CStr::from_ptr(err_ptr)
+                        .to_string_lossy()
+                        .into_owned()
+                } else {
+                    "Unknown error".into()
+                };
+                tj3Destroy(handle);
+                return Err(DecodeError::DecodingFailed(format!(
+                    "tj3Decompress8 failed: {}",
+                    err_msg
+                )));
+            }
+
+            tj3Destroy(handle);
         }
 
+        let local_in_x = in_rect.x - crop_x;
+        let local_in_y = in_rect.y - crop_y;
+
         let scaled_in_rect = Rect {
-            x: in_rect.x / scale_denom,
-            y: in_rect.y / scale_denom,
+            x: local_in_x / scale_denom,
+            y: local_in_y / scale_denom,
             width: in_rect.width / scale_denom,
             height: in_rect.height / scale_denom,
         };
 
-        // Ensure we force the bicubic resizer if the IDCT dimensions don't perfectly match the target
         let remaining_sample_size =
             if scaled_in_rect.width == out_rect.width && scaled_in_rect.height == out_rect.height {
                 1
@@ -168,7 +188,7 @@ impl Decoder for JpegDecoder {
 
         downsample_region(
             &idct_pixels,
-            idct_width,
+            scaled_crop_w,
             4,
             scaled_in_rect,
             out_rect,

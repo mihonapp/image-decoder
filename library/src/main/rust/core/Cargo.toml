@@ -5,7 +5,8 @@ edition = "2021"
 
 [dependencies]
 # Image format decoders
-turbojpeg = "1.4.0"
+turbojpeg = "1.4"
+turbojpeg-sys = "1.1"
 png = "0.18"
 webp = "0.3"
 libwebp-sys = { version = "0.14", default-features = false, features = [
