@@ -145,8 +145,8 @@ impl Decoder for HeifDecoder {
 
         // By padding the width to match the stride, we trick the resizer into perfectly
         // traversing the SIMD padding natively, entirely avoiding the massive RGBA buffer copy.
-        if stride.is_multiple_of(4) {
-            let padded_width = stride / 4;
+        if stride.is_multiple_of(components) {
+            let padded_width = stride / components;
             downsample_region(
                 plane.data,
                 padded_width,
