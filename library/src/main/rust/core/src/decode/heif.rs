@@ -28,7 +28,6 @@ impl HeifDecoder {
     }
 }
 
-/// Extract ICC profile from a HEIF/AVIF image via libheif.
 fn extract_heif_icc(data: &[u8]) -> Option<Vec<u8>> {
     let ctx = libheif_rs::HeifContext::read_from_bytes(data).ok()?;
     let handle = ctx.primary_image_handle().ok()?;
@@ -63,18 +62,25 @@ fn parse_info(data: &[u8], crop_borders: bool) -> Result<ImageInfo, DecodeError>
         ) {
             if let Some(plane) = image.planes().interleaved {
                 let stride = plane.stride as usize;
+                let width_usize = image_width as usize;
+                let height_usize = image_height as usize;
+                let pixel_count = width_usize * height_usize;
 
-                let luma: Vec<u8> = plane
-                    .data
-                    .chunks(stride)
-                    .take(image_height as usize)
-                    .flat_map(|src_row| {
-                        let valid_src_pixels = &src_row[..image_width as usize * 3];
-                        valid_src_pixels
-                            .chunks_exact(3)
-                            .map(|rgb| rgb_to_luma(rgb[0], rgb[1], rgb[2]))
-                    })
-                    .collect();
+                let mut luma = Vec::with_capacity(pixel_count);
+                unsafe {
+                    luma.set_len(pixel_count);
+                }
+
+                luma.chunks_mut(width_usize)
+                    .zip(plane.data.chunks(stride).take(height_usize))
+                    .for_each(|(dst_row, src_row)| {
+                        dst_row
+                            .iter_mut()
+                            .zip(src_row[..width_usize * 3].chunks_exact(3))
+                            .for_each(|(dst, rgb)| {
+                                *dst = rgb_to_luma(rgb[0], rgb[1], rgb[2]);
+                            });
+                    });
 
                 bounds = find_borders(&luma, image_width, image_height);
             }
@@ -137,21 +143,29 @@ impl Decoder for HeifDecoder {
                 out_pixels,
             )?;
         } else {
-            // Multiply in usize space to prevent u32 wrap-around panic
             let w_usize = width as usize;
             let h_usize = height as usize;
             let stride_usize = stride as usize;
 
-            let rgba: Vec<u8> = plane
-                .data
-                .chunks(stride_usize)
-                .take(h_usize)
-                .flat_map(|row| row[..w_usize * 4].iter().copied())
-                .collect();
+            let buffer_size = w_usize
+                .checked_mul(h_usize)
+                .and_then(|s| s.checked_mul(4))
+                .ok_or_else(|| DecodeError::DecodingFailed("HEIF dimensions overflow".into()))?;
+
+            let mut rgba = Vec::with_capacity(buffer_size);
+            unsafe {
+                rgba.set_len(buffer_size);
+            }
+
+            rgba.chunks_exact_mut(w_usize * 4)
+                .zip(plane.data.chunks(stride_usize).take(h_usize))
+                .for_each(|(dst_row, src_row)| {
+                    dst_row.copy_from_slice(&src_row[..w_usize * 4]);
+                });
+
             downsample_region(&rgba, width, 4, in_rect, out_rect, sample_size, out_pixels)?;
         }
 
-        // Apply ICC colour transform if the source has an embedded profile.
         if let Some(ref src_icc) = self.source_profile_data {
             let pixel_count = (out_rect.width * out_rect.height) as usize;
             transform_pixels(
