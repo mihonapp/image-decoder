@@ -69,30 +69,44 @@ fn decode_grayscale(data: &[u8], width: u32, height: u32) -> Result<Vec<u8>, Dec
 
     let (color_type, _) = reader.output_color_type();
     let samples = color_type.samples();
-    let out_h = reader.info().height as usize;
-    let buffer_size = (width * height) as usize;
+    let out_w = reader.info().width as usize;
 
-    let gray: Vec<u8> = std::iter::from_fn(|| match reader.next_row() {
-        Ok(Some(row)) => Some(Ok(row.data().to_vec())),
-        Ok(None) => None,
-        Err(e) => Some(Err(DecodeError::DecodingFailed(format!("PNG row: {e}")))),
-    })
-    .take(out_h)
-    .try_fold(
-        Vec::with_capacity(buffer_size),
-        |mut acc, row_result| -> Result<_, DecodeError> {
-            let src = row_result?;
-            if samples >= 3 {
-                acc.extend(
-                    src.chunks_exact(samples)
-                        .map(|p| rgb_to_luma(p[0], p[1], p[2])),
-                );
-            } else {
-                acc.extend(src.chunks_exact(samples).map(|p| p[0]));
+    // Prevent u32 overflow
+    let buffer_size = (width as usize)
+        .checked_mul(height as usize)
+        .ok_or_else(|| DecodeError::DecodingFailed("PNG dimensions overflow".into()))?;
+
+    let mut gray = Vec::with_capacity(buffer_size);
+    unsafe {
+        gray.set_len(buffer_size);
+    }
+
+    gray.chunks_exact_mut(out_w)
+        .try_for_each(|dst_row| -> Result<(), DecodeError> {
+            let row = reader
+                .next_row()
+                .map_err(|e| DecodeError::DecodingFailed(format!("PNG row: {e}")))?;
+
+            if let Some(r) = row {
+                let src_row = r.data();
+                if samples >= 3 {
+                    dst_row
+                        .iter_mut()
+                        .zip(src_row.chunks_exact(samples))
+                        .for_each(|(dst, src)| {
+                            *dst = rgb_to_luma(src[0], src[1], src[2]);
+                        });
+                } else {
+                    dst_row
+                        .iter_mut()
+                        .zip(src_row.chunks_exact(samples))
+                        .for_each(|(dst, src)| {
+                            *dst = src[0];
+                        });
+                }
             }
-            Ok(acc)
-        },
-    )?;
+            Ok(())
+        })?;
 
     Ok(gray)
 }
@@ -119,35 +133,67 @@ impl Decoder for PngDecoder {
         let (color_type, _) = reader.output_color_type();
         let samples = color_type.samples();
         let out_w = reader.info().width as usize;
-        let out_h = reader.info().height as usize;
-        let buffer_size = (self.info.image_width * self.info.image_height * 4) as usize;
 
-        let rgba_pixels: Vec<u8> = std::iter::from_fn(|| match reader.next_row() {
-            Ok(Some(row)) => Some(Ok(row.data().to_vec())),
-            Ok(None) => None,
-            Err(e) => Some(Err(DecodeError::DecodingFailed(format!("PNG row: {e}")))),
-        })
-        .take(out_h)
-        .try_fold(
-            Vec::with_capacity(buffer_size),
-            |mut acc, row_result| -> Result<_, DecodeError> {
-                let src_row = row_result?;
-                match samples {
-                    1 => acc.extend(src_row.iter().flat_map(|&luma| [luma, luma, luma, 255])),
-                    2 => acc.extend(
-                        src_row
-                            .chunks_exact(2)
-                            .flat_map(|s| [s[0], s[0], s[0], s[1]]),
-                    ),
-                    3 => acc.extend(
-                        src_row
-                            .chunks_exact(3)
-                            .flat_map(|s| [s[0], s[1], s[2], 255]),
-                    ),
-                    4 => acc.extend_from_slice(&src_row[..out_w * 4]),
-                    _ => {}
+        // Safely calculate buffer size
+        let buffer_size = (self.info.image_width as usize)
+            .checked_mul(self.info.image_height as usize)
+            .and_then(|s| s.checked_mul(4))
+            .ok_or_else(|| DecodeError::DecodingFailed("PNG dimensions overflow".into()))?;
+
+        let mut rgba_pixels = Vec::with_capacity(buffer_size);
+        unsafe {
+            rgba_pixels.set_len(buffer_size);
+        }
+
+        // Iterate over pre-allocated destination rows functionally
+        rgba_pixels.chunks_exact_mut(out_w * 4).try_for_each(
+            |dst_row| -> Result<(), DecodeError> {
+                let row = reader
+                    .next_row()
+                    .map_err(|e| DecodeError::DecodingFailed(format!("PNG row: {e}")))?;
+
+                if let Some(r) = row {
+                    let src_row = r.data();
+                    match samples {
+                        1 => {
+                            dst_row.chunks_exact_mut(4).zip(src_row.iter()).for_each(
+                                |(dst, &luma)| {
+                                    dst[0] = luma;
+                                    dst[1] = luma;
+                                    dst[2] = luma;
+                                    dst[3] = 255;
+                                },
+                            );
+                        }
+                        2 => {
+                            dst_row
+                                .chunks_exact_mut(4)
+                                .zip(src_row.chunks_exact(2))
+                                .for_each(|(dst, src)| {
+                                    dst[0] = src[0];
+                                    dst[1] = src[0];
+                                    dst[2] = src[0];
+                                    dst[3] = src[1];
+                                });
+                        }
+                        3 => {
+                            dst_row
+                                .chunks_exact_mut(4)
+                                .zip(src_row.chunks_exact(3))
+                                .for_each(|(dst, src)| {
+                                    dst[0] = src[0];
+                                    dst[1] = src[1];
+                                    dst[2] = src[2];
+                                    dst[3] = 255;
+                                });
+                        }
+                        4 => {
+                            dst_row.copy_from_slice(&src_row[..out_w * 4]);
+                        }
+                        _ => {}
+                    }
                 }
-                Ok(acc)
+                Ok(())
             },
         )?;
 
