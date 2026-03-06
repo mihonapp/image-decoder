@@ -132,10 +132,13 @@ impl Decoder for HeifDecoder {
         let height = image.height() as u32;
         let stride = plane.stride as u32;
 
-        if stride == width * 4 {
+        // By padding the width to match the stride, we trick the resizer into perfectly
+        // traversing the SIMD padding natively, entirely avoiding the massive RGBA buffer copy.
+        if stride % 4 == 0 {
+            let padded_width = stride / 4;
             downsample_region(
                 plane.data,
-                width,
+                padded_width,
                 4,
                 in_rect,
                 out_rect,
@@ -143,6 +146,7 @@ impl Decoder for HeifDecoder {
                 out_pixels,
             )?;
         } else {
+            // Ultimate safety fallback for non-RGBA aligned strides (exceedingly rare)
             let w_usize = width as usize;
             let h_usize = height as usize;
             let stride_usize = stride as usize;
