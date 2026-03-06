@@ -1,5 +1,5 @@
 use crate::borders::find_borders;
-use crate::color::{rgb_to_luma, transform_pixels};
+use crate::color::transform_pixels;
 use crate::decode::{DecodeError, Decoder};
 use crate::resize::downsample_region;
 use crate::types::{ImageInfo, Rect};
@@ -7,7 +7,6 @@ use crate::types::{ImageInfo, Rect};
 use jpegxl_rs::decode::{decoder_builder, PixelFormat};
 use jpegxl_rs::parallel::resizable_runner::ResizableRunner;
 
-/// JPEG XL decoder backed by libjxl via `jpegxl-rs`.
 pub struct JxlDecoder {
     data: Vec<u8>,
     info: ImageInfo,
@@ -38,6 +37,24 @@ fn extract_jxl_icc(data: &[u8]) -> Option<Vec<u8>> {
     metadata.icc_profile
 }
 
+/// Decode the JXL data using libjxl with multi-threaded parallel runner.
+/// Returns (metadata, raw pixel bytes).
+fn decode_internal(data: &[u8]) -> Result<(jpegxl_rs::decode::Metadata, Vec<u8>), DecodeError> {
+    let runner = ResizableRunner::default();
+    let decoder = decoder_builder()
+        .parallel_runner(&runner)
+        .pixel_format(PixelFormat {
+            num_channels: 4,
+            ..Default::default()
+        })
+        .build()
+        .map_err(|e| DecodeError::DecodingFailed(format!("JXL decoder init: {e}")))?;
+
+    decoder
+        .decode_with::<u8>(data)
+        .map_err(|e| DecodeError::DecodingFailed(format!("JXL decode: {e}")))
+}
+
 /// Read only the JXL basic info (width, height) from the header without
 /// decoding any pixel data. Uses the low-level jpegxl-sys FFI so that
 /// only `BasicInfo` events are subscribed (no `FullImage`).
@@ -57,7 +74,7 @@ fn read_basic_info(data: &[u8]) -> Result<(u32, u32), DecodeError> {
             ));
         }
 
-        // Subscribe only to BasicInfo — no pixel decoding will happen.
+        // Subscribe only to BasicInfo, no pixel decoding will happen.
         let status = JxlDecoderSubscribeEvents(dec, JxlDecoderStatus::BasicInfo as i32);
         if status != JxlDecoderStatus::Success {
             JxlDecoderDestroy(dec);
@@ -101,20 +118,22 @@ fn read_basic_info(data: &[u8]) -> Result<(u32, u32), DecodeError> {
 
 fn parse_info(data: &[u8], crop_borders: bool) -> Result<ImageInfo, DecodeError> {
     let (image_width, image_height) = read_basic_info(data)?;
-    super::check_dimensions(image_width, image_height)?;
-
     let mut bounds = Rect::full(image_width, image_height);
 
     if crop_borders {
-        if let Ok(mut rgba) = decode_rgba(data) {
-            // Convert RGBA→grayscale in-place: overwrite the first W*H bytes
-            // of the buffer so we don't allocate a second Vec.
-            let pixel_count = (image_width * image_height) as usize;
-            for i in 0..pixel_count {
-                let base = i * 4;
-                rgba[i] = rgb_to_luma(rgba[base], rgba[base + 1], rgba[base + 2]);
-            }
-            bounds = find_borders(&rgba[..pixel_count], image_width, image_height);
+        let runner = ResizableRunner::default();
+        // Decode directly to 1-channel grayscale, which saves 75% memory/bandwidth over RGBA.
+        let decoder = decoder_builder()
+            .parallel_runner(&runner)
+            .pixel_format(PixelFormat {
+                num_channels: 1,
+                ..Default::default()
+            })
+            .build()
+            .map_err(|e| DecodeError::DecodingFailed(format!("JXL decoder init: {e}")))?;
+
+        if let Ok((_meta, gray_pixels)) = decoder.decode_with::<u8>(data) {
+            bounds = find_borders(&gray_pixels, image_width, image_height);
         }
     }
 
@@ -124,32 +143,6 @@ fn parse_info(data: &[u8], crop_borders: bool) -> Result<ImageInfo, DecodeError>
         is_animated: false,
         bounds,
     })
-}
-
-/// Decode the JXL data using libjxl with multi-threaded parallel runner.
-/// Returns (metadata, raw pixel bytes).
-fn decode_internal(data: &[u8]) -> Result<(jpegxl_rs::decode::Metadata, Vec<u8>), DecodeError> {
-    let runner = ResizableRunner::default();
-    let decoder = decoder_builder()
-        .parallel_runner(&runner)
-        .pixel_format(PixelFormat {
-            num_channels: 4,
-            ..Default::default()
-        })
-        .build()
-        .map_err(|e| DecodeError::DecodingFailed(format!("JXL decoder init: {e}")))?;
-
-    let (metadata, pixels) = decoder
-        .decode_with::<u8>(data)
-        .map_err(|e| DecodeError::DecodingFailed(format!("JXL decode: {e}")))?;
-
-    Ok((metadata, pixels))
-}
-
-/// Decode the JXL image to an RGBA u8 buffer.
-fn decode_rgba(data: &[u8]) -> Result<Vec<u8>, DecodeError> {
-    let (_metadata, rgba) = decode_internal(data)?;
-    Ok(rgba)
 }
 
 impl Decoder for JxlDecoder {
@@ -164,7 +157,20 @@ impl Decoder for JxlDecoder {
         in_rect: Rect,
         sample_size: u32,
     ) -> Result<(), DecodeError> {
-        let rgba = decode_rgba(&self.data)?;
+        let runner = ResizableRunner::default();
+        let decoder = decoder_builder()
+            .parallel_runner(&runner)
+            .pixel_format(PixelFormat {
+                num_channels: 4,
+                ..Default::default()
+            })
+            .build()
+            .map_err(|e| DecodeError::DecodingFailed(format!("JXL decoder init: {e}")))?;
+
+        let (metadata, rgba) = decoder
+            .decode_with::<u8>(&self.data)
+            .map_err(|e| DecodeError::DecodingFailed(format!("JXL decode: {e}")))?;
+
         let full_width = self.info.image_width;
 
         downsample_region(
@@ -178,7 +184,12 @@ impl Decoder for JxlDecoder {
         )?;
 
         // Apply ICC colour transform if the source has an embedded profile.
-        if let Some(ref src_icc) = self.source_profile_data {
+        // We use the lazily-extracted source_profile_data or fallback to the one decoded here.
+        let profile_to_use = self
+            .source_profile_data
+            .as_ref()
+            .or(metadata.icc_profile.as_ref());
+        if let Some(src_icc) = profile_to_use {
             let pixel_count = (out_rect.width * out_rect.height) as usize;
             transform_pixels(
                 out_pixels,
