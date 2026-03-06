@@ -114,13 +114,19 @@ impl Decoder for HeifDecoder {
             .primary_image_handle()
             .map_err(|e| DecodeError::DecodingFailed(format!("HEIF handle: {e}")))?;
 
+        // Only decode alpha if the image actually has it.
+        // Saves 33% memory bandwidth on standard opaque photos.
+        let has_alpha = handle.has_alpha_channel();
+        let chroma = if has_alpha {
+            libheif_rs::RgbChroma::Rgba
+        } else {
+            libheif_rs::RgbChroma::Rgb
+        };
+        let components = if has_alpha { 4 } else { 3 };
+
         let lib_heif = libheif_rs::LibHeif::new();
         let image = lib_heif
-            .decode(
-                &handle,
-                libheif_rs::ColorSpace::Rgb(libheif_rs::RgbChroma::Rgba),
-                None,
-            )
+            .decode(&handle, libheif_rs::ColorSpace::Rgb(chroma), None)
             .map_err(|e| DecodeError::DecodingFailed(format!("HEIF decode: {e}")))?;
 
         let plane = image
@@ -139,35 +145,61 @@ impl Decoder for HeifDecoder {
             downsample_region(
                 plane.data,
                 padded_width,
-                4,
+                components,
                 in_rect,
                 out_rect,
                 sample_size,
                 out_pixels,
             )?;
         } else {
-            // Ultimate safety fallback for non-RGBA aligned strides (exceedingly rare)
             let w_usize = width as usize;
             let h_usize = height as usize;
             let stride_usize = stride as usize;
+            let comp_usize = components as usize;
 
             let buffer_size = w_usize
                 .checked_mul(h_usize)
-                .and_then(|s| s.checked_mul(4))
+                .and_then(|s| s.checked_mul(comp_usize))
                 .ok_or_else(|| DecodeError::DecodingFailed("HEIF dimensions overflow".into()))?;
 
-            let mut rgba = Vec::with_capacity(buffer_size);
+            let mut pixel_buf = Vec::with_capacity(buffer_size);
             unsafe {
-                rgba.set_len(buffer_size);
+                pixel_buf.set_len(buffer_size);
             }
 
-            rgba.chunks_exact_mut(w_usize * 4)
+            pixel_buf
+                .chunks_exact_mut(w_usize * comp_usize)
                 .zip(plane.data.chunks(stride_usize).take(h_usize))
                 .for_each(|(dst_row, src_row)| {
-                    dst_row.copy_from_slice(&src_row[..w_usize * 4]);
+                    dst_row.copy_from_slice(&src_row[..w_usize * comp_usize]);
                 });
 
-            downsample_region(&rgba, width, 4, in_rect, out_rect, sample_size, out_pixels)?;
+            downsample_region(
+                &pixel_buf,
+                width,
+                components,
+                in_rect,
+                out_rect,
+                sample_size,
+                out_pixels,
+            )?;
+        }
+
+        // If we downsampled a 3-channel RGB image, the output is sitting in the
+        // front of `out_pixels`. We must expand it in-place to 4-channel RGBA.
+        if !has_alpha {
+            let pixel_count = (out_rect.width * out_rect.height) as usize;
+            for i in (0..pixel_count).rev() {
+                let src_base = i * 3;
+                let dst_base = i * 4;
+                let r = out_pixels[src_base];
+                let g = out_pixels[src_base + 1];
+                let b = out_pixels[src_base + 2];
+                out_pixels[dst_base] = r;
+                out_pixels[dst_base + 1] = g;
+                out_pixels[dst_base + 2] = b;
+                out_pixels[dst_base + 3] = 255;
+            }
         }
 
         if let Some(ref src_icc) = self.source_profile_data {
