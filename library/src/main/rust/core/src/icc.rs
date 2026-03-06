@@ -58,13 +58,14 @@ pub fn extract_jpeg_icc(data: &[u8]) -> Option<Vec<u8>> {
         }
 
         // APP2 = 0xE2
-        if marker == 0xE2 && payload_len > 14 {
-            if &data[payload_start..payload_start + 12] == ICC_MARKER {
-                let seq = data[payload_start + 12];
-                // data[payload_start + 13] = total count (we derive it from max seq)
-                let chunk = data[payload_start + 14..seg_end].to_vec();
-                chunks.push((seq, chunk));
-            }
+        if marker == 0xE2
+            && payload_len > 14
+            && &data[payload_start..payload_start + 12] == ICC_MARKER
+        {
+            let seq = data[payload_start + 12];
+            // data[payload_start + 13] = total count (we derive it from max seq)
+            let chunk = data[payload_start + 14..seg_end].to_vec();
+            chunks.push((seq, chunk));
         }
 
         pos = seg_end;

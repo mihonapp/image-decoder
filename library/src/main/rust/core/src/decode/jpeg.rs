@@ -88,8 +88,8 @@ impl Decoder for JpegDecoder {
         let crop_w = std::cmp::min(in_rect.width + (in_rect.x - crop_x), full_width - crop_x);
         let crop_h = std::cmp::min(in_rect.height + (in_rect.y - crop_y), full_height - crop_y);
 
-        let scaled_crop_w = (crop_w + scale_denom - 1) / scale_denom;
-        let scaled_crop_h = (crop_h + scale_denom - 1) / scale_denom;
+        let scaled_crop_w = crop_w.div_ceil(scale_denom);
+        let scaled_crop_h = crop_h.div_ceil(scale_denom);
 
         let buffer_size = (scaled_crop_w as usize)
             .checked_mul(scaled_crop_h as usize)

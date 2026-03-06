@@ -134,13 +134,13 @@ impl Decoder for HeifDecoder {
             .interleaved
             .ok_or_else(|| DecodeError::DecodingFailed("HEIF: no interleaved plane".into()))?;
 
-        let width = image.width() as u32;
-        let height = image.height() as u32;
+        let width = image.width();
+        let height = image.height();
         let stride = plane.stride as u32;
 
         // By padding the width to match the stride, we trick the resizer into perfectly
         // traversing the SIMD padding natively, entirely avoiding the massive RGBA buffer copy.
-        if stride % 4 == 0 {
+        if stride.is_multiple_of(4) {
             let padded_width = stride / 4;
             downsample_region(
                 plane.data,

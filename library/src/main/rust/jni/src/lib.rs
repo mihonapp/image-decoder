@@ -26,7 +26,14 @@ static mut IMAGE_TYPE_CTOR: jni::sys::jmethodID = std::ptr::null_mut();
 static mut CREATE_BITMAP_METHOD: jni::sys::jmethodID = std::ptr::null_mut();
 
 #[unsafe(no_mangle)]
-pub extern "system" fn JNI_OnLoad(vm: *mut jni::sys::JavaVM, _reserved: *mut c_void) -> jint {
+/// # Safety
+///
+/// This function is called by the JVM with a valid `JavaVM*` pointer during
+/// native library load. The pointer must be non-null and must outlive this call.
+pub unsafe extern "system" fn JNI_OnLoad(
+    vm: *mut jni::sys::JavaVM,
+    _reserved: *mut c_void,
+) -> jint {
     android_logger::init_once(
         android_logger::Config::default()
             .with_max_level(log::LevelFilter::Warn)
