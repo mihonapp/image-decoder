@@ -61,26 +61,31 @@ fn parse_info(data: &[u8], crop_borders: bool) -> Result<ImageInfo, DecodeError>
             None,
         ) {
             if let Some(plane) = image.planes().interleaved {
-                let stride = plane.stride as usize;
+                let stride = plane.stride;
                 let width_usize = image_width as usize;
                 let height_usize = image_height as usize;
                 let pixel_count = width_usize * height_usize;
 
                 let mut luma = Vec::with_capacity(pixel_count);
+                {
+                    // Intentionally avoid zero-filling: write every byte first, then set_len.
+                    let dst =
+                        unsafe { std::slice::from_raw_parts_mut(luma.as_mut_ptr(), pixel_count) };
+
+                    dst.chunks_mut(width_usize)
+                        .zip(plane.data.chunks(stride).take(height_usize))
+                        .for_each(|(dst_row, src_row)| {
+                            dst_row
+                                .iter_mut()
+                                .zip(src_row[..width_usize * 3].chunks_exact(3))
+                                .for_each(|(dst_px, rgb)| {
+                                    *dst_px = rgb_to_luma(rgb[0], rgb[1], rgb[2]);
+                                });
+                        });
+                }
                 unsafe {
                     luma.set_len(pixel_count);
                 }
-
-                luma.chunks_mut(width_usize)
-                    .zip(plane.data.chunks(stride).take(height_usize))
-                    .for_each(|(dst_row, src_row)| {
-                        dst_row
-                            .iter_mut()
-                            .zip(src_row[..width_usize * 3].chunks_exact(3))
-                            .for_each(|(dst, rgb)| {
-                                *dst = rgb_to_luma(rgb[0], rgb[1], rgb[2]);
-                            });
-                    });
 
                 bounds = find_borders(&luma, image_width, image_height);
             }
@@ -163,16 +168,19 @@ impl Decoder for HeifDecoder {
                 .ok_or_else(|| DecodeError::DecodingFailed("HEIF dimensions overflow".into()))?;
 
             let mut pixel_buf = Vec::with_capacity(buffer_size);
+            {
+                // Intentionally avoid zero-filling: write every byte first, then set_len.
+                let dst =
+                    unsafe { std::slice::from_raw_parts_mut(pixel_buf.as_mut_ptr(), buffer_size) };
+                dst.chunks_exact_mut(w_usize * comp_usize)
+                    .zip(plane.data.chunks(stride_usize).take(h_usize))
+                    .for_each(|(dst_row, src_row)| {
+                        dst_row.copy_from_slice(&src_row[..w_usize * comp_usize]);
+                    });
+            }
             unsafe {
                 pixel_buf.set_len(buffer_size);
             }
-
-            pixel_buf
-                .chunks_exact_mut(w_usize * comp_usize)
-                .zip(plane.data.chunks(stride_usize).take(h_usize))
-                .for_each(|(dst_row, src_row)| {
-                    dst_row.copy_from_slice(&src_row[..w_usize * comp_usize]);
-                });
 
             downsample_region(
                 &pixel_buf,

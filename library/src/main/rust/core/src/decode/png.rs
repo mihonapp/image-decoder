@@ -77,36 +77,40 @@ fn decode_grayscale(data: &[u8], width: u32, height: u32) -> Result<Vec<u8>, Dec
         .ok_or_else(|| DecodeError::DecodingFailed("PNG dimensions overflow".into()))?;
 
     let mut gray = Vec::with_capacity(buffer_size);
+    {
+        // Intentionally avoid zero-filling: write every byte first, then set_len.
+        let dst = unsafe { std::slice::from_raw_parts_mut(gray.as_mut_ptr(), buffer_size) };
+
+        dst.chunks_exact_mut(out_w)
+            .try_for_each(|dst_row| -> Result<(), DecodeError> {
+                let row = reader
+                    .next_row()
+                    .map_err(|e| DecodeError::DecodingFailed(format!("PNG row: {e}")))?;
+
+                if let Some(r) = row {
+                    let src_row = r.data();
+                    if samples >= 3 {
+                        dst_row
+                            .iter_mut()
+                            .zip(src_row.chunks_exact(samples))
+                            .for_each(|(dst_px, src)| {
+                                *dst_px = rgb_to_luma(src[0], src[1], src[2]);
+                            });
+                    } else {
+                        dst_row
+                            .iter_mut()
+                            .zip(src_row.chunks_exact(samples))
+                            .for_each(|(dst_px, src)| {
+                                *dst_px = src[0];
+                            });
+                    }
+                }
+                Ok(())
+            })?;
+    }
     unsafe {
         gray.set_len(buffer_size);
     }
-
-    gray.chunks_exact_mut(out_w)
-        .try_for_each(|dst_row| -> Result<(), DecodeError> {
-            let row = reader
-                .next_row()
-                .map_err(|e| DecodeError::DecodingFailed(format!("PNG row: {e}")))?;
-
-            if let Some(r) = row {
-                let src_row = r.data();
-                if samples >= 3 {
-                    dst_row
-                        .iter_mut()
-                        .zip(src_row.chunks_exact(samples))
-                        .for_each(|(dst, src)| {
-                            *dst = rgb_to_luma(src[0], src[1], src[2]);
-                        });
-                } else {
-                    dst_row
-                        .iter_mut()
-                        .zip(src_row.chunks_exact(samples))
-                        .for_each(|(dst, src)| {
-                            *dst = src[0];
-                        });
-                }
-            }
-            Ok(())
-        })?;
 
     Ok(gray)
 }
@@ -141,61 +145,65 @@ impl Decoder for PngDecoder {
             .ok_or_else(|| DecodeError::DecodingFailed("PNG dimensions overflow".into()))?;
 
         let mut rgba_pixels = Vec::with_capacity(buffer_size);
+        {
+            // Intentionally avoid zero-filling: write every byte first, then set_len.
+            let dst =
+                unsafe { std::slice::from_raw_parts_mut(rgba_pixels.as_mut_ptr(), buffer_size) };
+
+            // Iterate over pre-allocated destination rows functionally
+            dst.chunks_exact_mut(out_w * 4)
+                .try_for_each(|dst_row| -> Result<(), DecodeError> {
+                    let row = reader
+                        .next_row()
+                        .map_err(|e| DecodeError::DecodingFailed(format!("PNG row: {e}")))?;
+
+                    if let Some(r) = row {
+                        let src_row = r.data();
+                        match samples {
+                            1 => {
+                                dst_row.chunks_exact_mut(4).zip(src_row.iter()).for_each(
+                                    |(dst_px, &luma)| {
+                                        dst_px[0] = luma;
+                                        dst_px[1] = luma;
+                                        dst_px[2] = luma;
+                                        dst_px[3] = 255;
+                                    },
+                                );
+                            }
+                            2 => {
+                                dst_row
+                                    .chunks_exact_mut(4)
+                                    .zip(src_row.chunks_exact(2))
+                                    .for_each(|(dst_px, src)| {
+                                        dst_px[0] = src[0];
+                                        dst_px[1] = src[0];
+                                        dst_px[2] = src[0];
+                                        dst_px[3] = src[1];
+                                    });
+                            }
+                            3 => {
+                                dst_row
+                                    .chunks_exact_mut(4)
+                                    .zip(src_row.chunks_exact(3))
+                                    .for_each(|(dst_px, src)| {
+                                        dst_px[0] = src[0];
+                                        dst_px[1] = src[1];
+                                        dst_px[2] = src[2];
+                                        dst_px[3] = 255;
+                                    });
+                            }
+                            4 => {
+                                dst_row.copy_from_slice(&src_row[..out_w * 4]);
+                            }
+                            _ => {}
+                        }
+                    }
+                    Ok(())
+                })?;
+        }
         unsafe {
             rgba_pixels.set_len(buffer_size);
         }
-
-        // Iterate over pre-allocated destination rows functionally
-        rgba_pixels.chunks_exact_mut(out_w * 4).try_for_each(
-            |dst_row| -> Result<(), DecodeError> {
-                let row = reader
-                    .next_row()
-                    .map_err(|e| DecodeError::DecodingFailed(format!("PNG row: {e}")))?;
-
-                if let Some(r) = row {
-                    let src_row = r.data();
-                    match samples {
-                        1 => {
-                            dst_row.chunks_exact_mut(4).zip(src_row.iter()).for_each(
-                                |(dst, &luma)| {
-                                    dst[0] = luma;
-                                    dst[1] = luma;
-                                    dst[2] = luma;
-                                    dst[3] = 255;
-                                },
-                            );
-                        }
-                        2 => {
-                            dst_row
-                                .chunks_exact_mut(4)
-                                .zip(src_row.chunks_exact(2))
-                                .for_each(|(dst, src)| {
-                                    dst[0] = src[0];
-                                    dst[1] = src[0];
-                                    dst[2] = src[0];
-                                    dst[3] = src[1];
-                                });
-                        }
-                        3 => {
-                            dst_row
-                                .chunks_exact_mut(4)
-                                .zip(src_row.chunks_exact(3))
-                                .for_each(|(dst, src)| {
-                                    dst[0] = src[0];
-                                    dst[1] = src[1];
-                                    dst[2] = src[2];
-                                    dst[3] = 255;
-                                });
-                        }
-                        4 => {
-                            dst_row.copy_from_slice(&src_row[..out_w * 4]);
-                        }
-                        _ => {}
-                    }
-                }
-                Ok(())
-            },
-        )?;
 
         downsample_region(
             &rgba_pixels,
