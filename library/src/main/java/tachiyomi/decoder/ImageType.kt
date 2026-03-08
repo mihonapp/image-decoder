@@ -1,6 +1,6 @@
 package tachiyomi.decoder
 
-data class ImageType internal constructor(
+class ImageType internal constructor(
   val format: Format,
   val isAnimated: Boolean
 ) {

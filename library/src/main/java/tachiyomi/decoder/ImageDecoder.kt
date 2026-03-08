@@ -2,6 +2,7 @@ package tachiyomi.decoder
 
 import android.graphics.Bitmap
 import android.graphics.Rect
+import android.util.Log
 import java.io.InputStream
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.locks.ReentrantReadWriteLock
@@ -94,7 +95,16 @@ class ImageDecoder private constructor(
 
   companion object {
     init {
-      System.loadLibrary("imagedecoder")
+      // libheifcodec.so must be loaded first — both libimagedecoder.so and
+      // libimagedecoder_cpp.so link against it dynamically, and explicitly
+      // pre-loading it avoids linker namespace issues on older Android versions.
+      System.loadLibrary("heifcodec")
+      val backend = ImageDecoderConfig.backend
+      when (backend) {
+        ImageDecoderConfig.Backend.CPP -> System.loadLibrary("imagedecoder_cpp")
+        ImageDecoderConfig.Backend.RUST -> System.loadLibrary("imagedecoder")
+      }
+      Log.i("ImageDecoder", "Loaded $backend backend")
     }
 
     fun newInstance(

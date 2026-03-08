@@ -1,0 +1,32 @@
+[package]
+name = "imagedecoder-core"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+# Image format decoders
+turbojpeg = "1.4"
+turbojpeg-sys = "1.1"
+png = "0.18"
+webp = "0.3"
+libwebp-sys = { version = "0.14", default-features = false, features = [
+    "parallel",
+] }
+jpegxl-rs = { version = "0.13", default-features = false, features = [
+    "vendored",
+] }
+jpegxl-sys = "0.12"
+libheif-rs = "2"
+
+# Color management
+lcms2 = { version = "6", features = ["static"] }
+
+# Downscaling
+fast_image_resize = { version = "6", features = ["rayon"] }
+
+# Utilities
+thiserror = "2"
+log = "0.4"
+
+[dev-dependencies]
+env_logger = "0.11"

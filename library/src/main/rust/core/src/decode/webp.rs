@@ -1,0 +1,182 @@
+use crate::borders::find_borders;
+use crate::color::{rgb_to_luma, transform_pixels};
+use crate::decode::{DecodeError, Decoder};
+use crate::icc::extract_webp_icc;
+use crate::types::{ImageInfo, Rect};
+
+pub struct WebpDecoder {
+    data: Vec<u8>,
+    info: ImageInfo,
+    source_profile_data: Option<Vec<u8>>,
+    target_profile_data: Option<Vec<u8>>,
+}
+
+impl WebpDecoder {
+    pub fn new(
+        data: Vec<u8>,
+        crop_borders: bool,
+        target_profile: Option<&[u8]>,
+    ) -> Result<Self, DecodeError> {
+        let info = parse_info(&data, crop_borders)?;
+        let source_profile_data = extract_webp_icc(&data);
+        Ok(Self {
+            data,
+            info,
+            source_profile_data,
+            target_profile_data: target_profile.map(|p| p.to_vec()),
+        })
+    }
+}
+
+fn parse_info(data: &[u8], crop_borders: bool) -> Result<ImageInfo, DecodeError> {
+    let mut image_width = 0;
+    let mut image_height = 0;
+
+    let status = unsafe {
+        libwebp_sys::WebPGetInfo(
+            data.as_ptr(),
+            data.len(),
+            &mut image_width,
+            &mut image_height,
+        )
+    };
+
+    if status == 0 {
+        return Err(DecodeError::DecodingFailed(
+            "WebP: invalid bitstream".into(),
+        ));
+    }
+
+    let image_width = image_width as u32;
+    let image_height = image_height as u32;
+    super::check_dimensions(image_width, image_height)?;
+    let is_animated = crate::format::detect(data)
+        .map(|t| t.is_animated)
+        .unwrap_or(false);
+    let mut bounds = Rect::full(image_width, image_height);
+
+    if crop_borders {
+        let decoder = webp::Decoder::new(data);
+        if let Some(image) = decoder.decode() {
+            let is_alpha = image.is_alpha();
+
+            let src_raw = &*image;
+            let chunk_size = if is_alpha { 4 } else { 3 };
+            let gray_buf: Vec<u8> = src_raw
+                .chunks_exact(chunk_size)
+                .map(|p| rgb_to_luma(p[0], p[1], p[2]))
+                .collect();
+            bounds = find_borders(&gray_buf, image_width, image_height);
+        } else {
+            return Err(DecodeError::DecodingFailed(
+                "WebP border decode failed".into(),
+            ));
+        }
+    }
+
+    Ok(ImageInfo {
+        image_width,
+        image_height,
+        is_animated,
+        bounds,
+    })
+}
+
+impl Decoder for WebpDecoder {
+    fn info(&self) -> &ImageInfo {
+        &self.info
+    }
+
+    fn decode(
+        &self,
+        out_pixels: &mut [u8],
+        out_rect: Rect,
+        in_rect: Rect,
+        _sample_size: u32,
+    ) -> Result<(), DecodeError> {
+        // Prevent i32 overflow for FFI parameters
+        if out_rect.width > i32::MAX as u32
+            || out_rect.height > i32::MAX as u32
+            || in_rect.width > i32::MAX as u32
+            || in_rect.height > i32::MAX as u32
+            || in_rect.x > i32::MAX as u32
+            || in_rect.y > i32::MAX as u32
+        {
+            return Err(DecodeError::InvalidRegion(
+                "Dimensions exceed maximum allowed size".into(),
+            ));
+        }
+
+        // Explicitly verify the output buffer is large enough
+        let expected_size = (out_rect.width as usize)
+            .checked_mul(out_rect.height as usize)
+            .and_then(|s| s.checked_mul(4))
+            .ok_or_else(|| DecodeError::DecodingFailed("Output dimensions overflow".into()))?;
+
+        if out_pixels.len() < expected_size {
+            return Err(DecodeError::DecodingFailed(
+                "Output buffer too small".into(),
+            ));
+        }
+
+        let mut config: libwebp_sys::WebPDecoderConfig = unsafe { std::mem::zeroed() };
+        if !unsafe { libwebp_sys::WebPInitDecoderConfig(&mut config) } {
+            return Err(DecodeError::DecodingFailed(
+                "WebPInitDecoderConfig failed".into(),
+            ));
+        }
+
+        config.output.colorspace = libwebp_sys::WEBP_CSP_MODE::MODE_RGBA;
+        config.output.is_external_memory = 1;
+        config.output.u.RGBA.rgba = out_pixels.as_mut_ptr();
+        config.output.u.RGBA.stride = (out_rect.width * 4) as i32;
+        config.output.u.RGBA.size = expected_size;
+
+        let original_width = self.info.image_width;
+        let original_height = self.info.image_height;
+
+        if in_rect.width != original_width || in_rect.height != original_height {
+            config.options.use_cropping = 1;
+            config.options.crop_left = in_rect.x as i32;
+            config.options.crop_top = in_rect.y as i32;
+            config.options.crop_width = in_rect.width as i32;
+            config.options.crop_height = in_rect.height as i32;
+        }
+
+        if out_rect.width != in_rect.width || out_rect.height != in_rect.height {
+            config.options.use_scaling = 1;
+            config.options.scaled_width = out_rect.width as i32;
+            config.options.scaled_height = out_rect.height as i32;
+        }
+
+        let status =
+            unsafe { libwebp_sys::WebPDecode(self.data.as_ptr(), self.data.len(), &mut config) };
+
+        // 3. Always clean up the decoder config properly to prevent hidden C-side leaks
+        unsafe { libwebp_sys::WebPFreeDecBuffer(&mut config.output) };
+
+        if status != libwebp_sys::VP8StatusCode::VP8_STATUS_OK {
+            return Err(DecodeError::DecodingFailed(format!(
+                "WebP decode failed: {:?}",
+                status
+            )));
+        }
+
+        // Apply ICC colour transform if the source has an embedded profile.
+        if let Some(ref src_icc) = self.source_profile_data {
+            let pixel_count = (out_rect.width * out_rect.height) as usize;
+            transform_pixels(
+                out_pixels,
+                pixel_count,
+                Some(src_icc),
+                self.target_profile_data.as_deref(),
+            )?;
+        }
+
+        Ok(())
+    }
+
+    fn use_transform(&self) -> bool {
+        self.source_profile_data.is_some()
+    }
+}

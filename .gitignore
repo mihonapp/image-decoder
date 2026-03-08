@@ -8,3 +8,11 @@
 .externalNativeBuild
 .cxx
 local.properties
+
+# Rust
+**/target/
+**/*.rs.bk
+library/src/main/rust/native-libs/**
+
+# Benchmarking
+**/benchmark/build/

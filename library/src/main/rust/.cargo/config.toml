@@ -1,0 +1,36 @@
+# Override libheif-sys's build script for all Android targets.
+#
+# When a [target.TRIPLE.links] table is present in config.toml, Cargo skips the
+# build script of the crate that declares `links = "heif"` (libheif-sys) for that
+# target.  This avoids the pkg-config failure that would otherwise occur when
+# cross-compiling to Android on a developer machine.
+#
+# libheif, libde265, and libdav1d are all bundled into libheifcodec.so by the
+# CMake build at library/src/main/cpp/heifcodec/CMakeLists.txt.  That CMake
+# writes its output directly to:
+#   library/src/main/rust/native-libs/{ABI}/libheifcodec.so
+#
+# Both Android packaging (via jniLibs.srcDirs in build.gradle) and the Rust
+# cross-linker (via the rustc-link-search entries below) read from that location.
+#
+# Note: rustc-link-search paths here are relative to the Cargo workspace root,
+# which is library/src/main/rust/ (where the top-level Cargo.toml lives).
+
+[target.aarch64-linux-android]
+rustflags = ["-C", "target-feature=+neon"]
+
+[target.aarch64-linux-android.heif]
+rustc-link-lib = ["dylib=heifcodec"]
+rustc-link-search = ["native=native-libs/arm64-v8a"]
+
+[target.armv7-linux-androideabi.heif]
+rustc-link-lib = ["dylib=heifcodec"]
+rustc-link-search = ["native=native-libs/armeabi-v7a"]
+
+[target.i686-linux-android.heif]
+rustc-link-lib = ["dylib=heifcodec"]
+rustc-link-search = ["native=native-libs/x86"]
+
+[target.x86_64-linux-android.heif]
+rustc-link-lib = ["dylib=heifcodec"]
+rustc-link-search = ["native=native-libs/x86_64"]

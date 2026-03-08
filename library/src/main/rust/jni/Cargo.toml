@@ -1,0 +1,17 @@
+[package]
+name = "imagedecoder-jni"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "imagedecoder"
+crate-type = ["cdylib"]
+
+[dependencies]
+imagedecoder-core = { path = "../core" }
+jni = "0.22"
+log = "0.4"
+android_logger = "0.15"
+
+[target.'cfg(target_os = "android")'.dependencies]
+ndk-sys = "0.6"
