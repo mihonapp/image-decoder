@@ -62,9 +62,6 @@ pub trait Decoder: Send {
 
     /// Whether a color transform should be applied after decoding.
     fn use_transform(&self) -> bool;
-
-    /// The lcms2 input pixel type constant for the decoded buffer.
-    fn lcms_in_type(&self) -> u32;
 }
 
 /// Detect the image type from the first bytes of a file.

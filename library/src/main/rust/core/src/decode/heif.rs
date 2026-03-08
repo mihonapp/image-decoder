@@ -226,8 +226,4 @@ impl Decoder for HeifDecoder {
     fn use_transform(&self) -> bool {
         self.source_profile_data.is_some()
     }
-
-    fn lcms_in_type(&self) -> u32 {
-        0
-    }
 }
