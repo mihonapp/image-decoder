@@ -1,6 +1,13 @@
 use crate::decode::DecodeError;
 use crate::types::Rect;
 use fast_image_resize as fir;
+use std::cell::RefCell;
+
+// Thread-local pool for the resizer to avoid reallocating internal convolution 
+// scratch buffers on every single tile/region decode request.
+thread_local! {
+    static RESIZER: RefCell<fir::Resizer> = RefCell::new(fir::Resizer::new());
+}
 
 /// Extract the region `in_rect` from `src_pixels` (full image of `src_width`
 /// pixels, `components` bytes per pixel), then downsample to `out_rect`
@@ -82,10 +89,10 @@ pub fn downsample_region(
             crop_h as f64,
         );
 
-    let mut resizer = fir::Resizer::new();
-    resizer
-        .resize(&src_image, &mut dst_image, Some(&options))
-        .map_err(|e| DecodeError::DecodingFailed(format!("resize: {e}")))?;
+    RESIZER.with(|resizer| {
+        let mut r = resizer.borrow_mut();
+        r.resize(&src_image, &mut dst_image, Some(&options))
+    }).map_err(|e| DecodeError::DecodingFailed(format!("resize: {e}")))?;
 
     Ok(())
 }
