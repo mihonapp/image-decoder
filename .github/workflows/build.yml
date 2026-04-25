@@ -1,4 +1,4 @@
-name: Code Quality and Build Checks
+name: Build Checks
 
 on:
   push:
@@ -14,7 +14,7 @@ concurrency:
 
 jobs:
   build:
-    name: Check code format and build
+    name: Check build
     runs-on: ubuntu-latest
 
     steps:
